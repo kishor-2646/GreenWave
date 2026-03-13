@@ -17,20 +17,30 @@ class _LoginPageState extends State<LoginPage> {
   final TextEditingController _passwordController = TextEditingController();
   bool _isLoading = false;
 
+  @override
+  void dispose() {
+    _emailController.dispose();
+    _passwordController.dispose();
+    super.dispose();
+  }
+
   void _handleLogin() async {
-    if (_emailController.text.isEmpty || _passwordController.text.isEmpty) {
-      _showError("Please fill in all fields");
+    FocusScope.of(context).unfocus();
+
+    final email = _emailController.text.trim();
+    final password = _passwordController.text.trim();
+
+    if (email.isEmpty || password.isEmpty) {
+      _showError("Please enter both email and password");
       return;
     }
 
     setState(() => _isLoading = true);
+
     final authService = Provider.of<AuthService>(context, listen: false);
 
     try {
-      await authService.login(
-        _emailController.text.trim(),
-        _passwordController.text.trim(),
-      );
+      await authService.login(email, password);
 
       if (mounted) {
         Navigator.pushReplacement(
@@ -39,7 +49,20 @@ class _LoginPageState extends State<LoginPage> {
         );
       }
     } catch (e) {
-      _showError(e.toString());
+      String errorMsg = e.toString();
+
+      // Handle the Pigeon cast error gracefully if it persists
+      if (errorMsg.contains('List<Object?>') && errorMsg.contains('PigeonUserDetails')) {
+        errorMsg = "System Sync Error: Please restart your IDE and run 'flutter clean'.";
+      } else if (errorMsg.contains('invalid-credential') ||
+          errorMsg.contains('wrong-password') ||
+          errorMsg.contains('user-not-found')) {
+        errorMsg = "Invalid email or password. Please try again.";
+      } else if (errorMsg.contains('network-request-failed')) {
+        errorMsg = "Check your internet connection.";
+      }
+
+      _showError(errorMsg);
     } finally {
       if (mounted) setState(() => _isLoading = false);
     }
@@ -47,7 +70,13 @@ class _LoginPageState extends State<LoginPage> {
 
   void _showError(String message) {
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(message), backgroundColor: Colors.redAccent),
+      SnackBar(
+        content: Text(message),
+        backgroundColor: Colors.redAccent,
+        behavior: SnackBarBehavior.floating,
+        margin: const EdgeInsets.all(20),
+        duration: const Duration(seconds: 4),
+      ),
     );
   }
 
@@ -87,7 +116,8 @@ class _LoginPageState extends State<LoginPage> {
                 const SizedBox(height: 32),
 
                 _buildInputLabel("Email ID"),
-                _buildTextField(inputBg, "Enter your email", controller: _emailController),
+                _buildTextField(inputBg, "Enter your email", controller: _emailController, keyboardType: TextInputType.emailAddress),
+
                 const SizedBox(height: 20),
 
                 _buildInputLabel("Password"),
@@ -113,7 +143,7 @@ class _LoginPageState extends State<LoginPage> {
                       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
                     ),
                     child: _isLoading
-                        ? const CircularProgressIndicator(color: Colors.white)
+                        ? const SizedBox(height: 20, width: 20, child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2))
                         : const Text("Login", style: TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold)),
                   ),
                 ),
@@ -163,10 +193,11 @@ class _LoginPageState extends State<LoginPage> {
     );
   }
 
-  Widget _buildTextField(Color bgColor, String hint, {bool isPassword = false, TextEditingController? controller}) {
+  Widget _buildTextField(Color bgColor, String hint, {bool isPassword = false, required TextEditingController controller, TextInputType keyboardType = TextInputType.text}) {
     return TextField(
       controller: controller,
       obscureText: isPassword,
+      keyboardType: keyboardType,
       style: const TextStyle(color: Colors.white),
       decoration: InputDecoration(
         hintText: hint,

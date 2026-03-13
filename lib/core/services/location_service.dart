@@ -6,51 +6,62 @@ class LocationService {
   final FirebaseFirestore _db = FirebaseFirestore.instance;
   final FirebaseAuth _auth = FirebaseAuth.instance;
 
-  // Start tracking and pushing to Firestore
   Stream<Position> getPositionStream() {
     return Geolocator.getPositionStream(
       locationSettings: const LocationSettings(
         accuracy: LocationAccuracy.high,
-        distanceFilter: 5, // Update every 5 meters to save battery/data
+        distanceFilter: 5,
       ),
     );
   }
 
-  // Update Firestore with current location
-  Future<void> updateLiveLocation(Position position, String role) async {
+  Future<void> updateLiveLocation(
+      Position position,
+      String role,
+      {
+        bool isEmergency = false,
+        double? destLat,
+        double? destLng,
+        String? encodedPolyline,
+        List<String>? pathJunctions,
+        String? nearestJunction,
+        bool? isNearJunction,
+      }
+      ) async {
     final user = _auth.currentUser;
     if (user == null) return;
 
-    // Directing data to the correct collection based on user role
-    final collection = role == "Ambulance Driver"
-        ? 'ambulanceLocations'
-        : 'policeLocations';
+    final collectionName = role == "Ambulance Driver" ? 'ambulanceLocations' : 'policeLocations';
 
-    await _db.collection('artifacts').doc('greenwave').collection('public').doc('data').collection(collection).doc(user.uid).set({
+    final Map<String, dynamic> data = {
       'uid': user.uid,
       'latitude': position.latitude,
       'longitude': position.longitude,
       'heading': position.heading,
       'timestamp': FieldValue.serverTimestamp(),
-      'status': 'active',
-    }, SetOptions(merge: true));
+      'status': isEmergency ? 'emergency' : 'active',
+    };
+
+    if (isEmergency) {
+      if (destLat != null) data['destLat'] = destLat;
+      if (destLng != null) data['destLng'] = destLng;
+      if (encodedPolyline != null) data['encodedPolyline'] = encodedPolyline;
+      if (pathJunctions != null) data['pathJunctions'] = pathJunctions;
+      if (nearestJunction != null) data['nearestJunction'] = nearestJunction;
+      if (isNearJunction != null) data['isNearJunction'] = isNearJunction;
+    }
+
+    await _db.collection(collectionName).doc(user.uid).set(data, SetOptions(merge: true));
   }
 
-  // Check and Request GPS Permissions
   Future<bool> handleLocationPermission() async {
-    bool serviceEnabled;
-    LocationPermission permission;
-
-    serviceEnabled = await Geolocator.isLocationServiceEnabled();
+    bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
     if (!serviceEnabled) return false;
-
-    permission = await Geolocator.checkPermission();
+    LocationPermission permission = await Geolocator.checkPermission();
     if (permission == LocationPermission.denied) {
       permission = await Geolocator.requestPermission();
       if (permission == LocationPermission.denied) return false;
     }
-
-    if (permission == LocationPermission.deniedForever) return false;
-    return true;
+    return permission != LocationPermission.deniedForever;
   }
 }
