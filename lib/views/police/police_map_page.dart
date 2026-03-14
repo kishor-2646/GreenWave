@@ -45,6 +45,8 @@ class _PoliceMapPageState extends State<PoliceMapPage> with SingleTickerProvider
   LatLng? _junctionLocation;
   String? _lastAnnouncedJunction;
   bool _isSpeaking = false;
+  bool _isQuotaExceeded = false;
+  DateTime? _lastSpeechTime;
 
   final Map<String, List<LatLng>> _polylineCache = {};
   final Set<String> _announcedAmbulances = {};
@@ -185,9 +187,24 @@ class _PoliceMapPageState extends State<PoliceMapPage> with SingleTickerProvider
   }
 
   Future<void> _speakGemini(String message) async {
+    // 1. Check Throttle (don't spam the API)
     if (_isSpeaking || !mounted) return;
+    final now = DateTime.now();
+    if (_lastSpeechTime != null && now.difference(_lastSpeechTime!).inSeconds < 10) {
+      debugPrint("VOICE_SYSTEM: Throttled to save API quota.");
+      return;
+    }
+
+    debugPrint("VOICE_SYSTEM: Initiating speech request for: $message");
     setState(() => _isSpeaking = true);
+
     final String apiKey = dotenv.get('GEMINI_API_KEY', fallback: dotenv.get('GOOGLE_MAPS_API_KEY', fallback: ""));
+    if (apiKey.isEmpty) {
+      debugPrint("VOICE_SYSTEM: Error - No API Key found in .env");
+      setState(() => _isSpeaking = false);
+      return;
+    }
+
     final url = Uri.parse("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key=$apiKey");
     final payload = {
       "contents": [{ "parts": [{ "text": message }] }],
@@ -196,40 +213,74 @@ class _PoliceMapPageState extends State<PoliceMapPage> with SingleTickerProvider
         "speechConfig": { "voiceConfig": { "prebuiltVoiceConfig": { "voiceName": "Aoede" } } }
       }
     };
+
     try {
       final response = await http.post(url, body: jsonEncode(payload), headers: {"Content-Type": "application/json"});
+
       if (response.statusCode == 200) {
+        setState(() => _isQuotaExceeded = false);
         final result = jsonDecode(response.body);
         final audioPart = result['candidates']?[0]?['content']?['parts']?[0]?['inlineData'];
         if (audioPart != null) {
+          debugPrint("VOICE_SYSTEM: Audio data received, playing...");
+          _lastSpeechTime = DateTime.now();
           final String base64Data = audioPart['data'];
           final wavBytes = _createWavHeader(base64Decode(base64Data), 24000);
           await _audioPlayer.play(BytesSource(wavBytes));
         }
+      } else if (response.statusCode == 429) {
+        debugPrint("VOICE_SYSTEM: Quota exceeded (429).");
+        if (mounted) setState(() => _isQuotaExceeded = true);
+      } else {
+        debugPrint("VOICE_SYSTEM: API Error ${response.statusCode}");
       }
-    } catch (e) { debugPrint("TTS Error: $e"); } finally { if (mounted) setState(() => _isSpeaking = false); }
+    } catch (e) {
+      debugPrint("VOICE_SYSTEM: Exception during TTS: $e");
+    } finally {
+      await Future.delayed(const Duration(seconds: 2));
+      if (mounted) setState(() => _isSpeaking = false);
+    }
   }
 
   void _processVoiceUpdates(Map<String, dynamic> data) {
     if (_myAssignedJunction == null) return;
+
     final String ambId = data['uid'] ?? 'unknown';
+
+    // 1. Initial Emergency Start Alert
     if (!_announcedAmbulances.contains(ambId)) {
       _announcedAmbulances.add(ambId);
       _speakGemini("Alert. An ambulance is incoming on your junction path. Stay alerted and updated as it moves near.");
       return;
     }
-    final currentJunction = data['nearestJunction']?.toString();
+
+    // 2. Sequential Junction Crossing Alerts
+    String? currentJunction = data['nearestJunction']?.toString();
     if (currentJunction == null || currentJunction == _lastAnnouncedJunction) return;
+
+    // QUOTA OPTIMIZATION: Filter out generic navigation instructions like "Turn right"
+    final genericWords = ['turn', 'head', 'keep', 'take', 'at the', 'roundabout', 'merge'];
+    bool isGeneric = genericWords.any((word) => currentJunction!.toLowerCase().startsWith(word));
+    if (isGeneric) {
+      debugPrint("VOICE_SYSTEM: Skipping generic instruction to save quota: $currentJunction");
+      return;
+    }
+
     final List path = data['pathJunctions'] ?? [];
     int myIdx = path.indexWhere((j) => _fuzzyMatch(j.toString(), _myAssignedJunction!));
     int ambIdx = path.indexWhere((j) => _fuzzyMatch(j.toString(), currentJunction));
+
     if (myIdx != -1 && ambIdx != -1 && ambIdx <= myIdx) {
       _lastAnnouncedJunction = currentJunction;
       int remaining = myIdx - ambIdx;
       String eta = _getEtaForJunction(data['junctionEtas'], _myAssignedJunction);
-      String voiceMessage = remaining == 0
-          ? "Alert. The ambulance has reached your junction. Clear the signals immediately."
-          : "Update. The ambulance has crossed $currentJunction. It is $remaining junctions away. Estimated arrival is $eta.";
+
+      String voiceMessage;
+      if (remaining == 0) {
+        voiceMessage = "Alert. The ambulance has reached your junction. Clear the signals immediately.";
+      } else {
+        voiceMessage = "Update. The ambulance has crossed $currentJunction. It is $remaining junctions away. Estimated arrival is $eta.";
+      }
       _speakGemini(voiceMessage);
     }
   }
@@ -242,6 +293,7 @@ class _PoliceMapPageState extends State<PoliceMapPage> with SingleTickerProvider
       _lastAnnouncedJunction = null;
       _announcedAmbulances.clear();
       _polylineCache.clear();
+      _isQuotaExceeded = false;
     });
     final uid = Provider.of<AuthService>(context, listen: false).currentUser?.uid;
     if (uid != null) {
@@ -352,6 +404,11 @@ class _PoliceMapPageState extends State<PoliceMapPage> with SingleTickerProvider
                 style: TextStyle(color: _myAssignedJunction == null ? Colors.orange : Colors.greenAccent, fontSize: 11, fontWeight: FontWeight.w600)
             ),
           ),
+          if (_isQuotaExceeded)
+            const Text(
+                "VOICE QUOTA REACHED",
+                style: TextStyle(color: Colors.redAccent, fontSize: 10, fontWeight: FontWeight.bold)
+            ),
         ],
       ),
     );
