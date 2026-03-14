@@ -6,6 +6,8 @@ class LocationService {
   final FirebaseFirestore _db = FirebaseFirestore.instance;
   final FirebaseAuth _auth = FirebaseAuth.instance;
 
+  String? get userId => _auth.currentUser?.uid;
+
   Stream<Position> getPositionStream() {
     return Geolocator.getPositionStream(
       locationSettings: const LocationSettings(
@@ -26,6 +28,7 @@ class LocationService {
         List<String>? pathJunctions,
         String? nearestJunction,
         bool? isNearJunction,
+        Map<String, String>? junctionEtas,
       }
       ) async {
     final user = _auth.currentUser;
@@ -49,8 +52,10 @@ class LocationService {
       if (pathJunctions != null) data['pathJunctions'] = pathJunctions;
       if (nearestJunction != null) data['nearestJunction'] = nearestJunction;
       if (isNearJunction != null) data['isNearJunction'] = isNearJunction;
+      if (junctionEtas != null) data['junctionEtas'] = junctionEtas;
     }
 
+    // Use merge to ensure clearedJunctions aren't wiped
     await _db.collection(collectionName).doc(user.uid).set(data, SetOptions(merge: true));
   }
 

@@ -5,7 +5,7 @@ import 'dart:convert';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import '../../core/services/auth_service.dart';
-import 'ambulance/map_page.dart';
+import 'ambulance/ambulance_map_page.dart';
 
 
 class AmbulanceDashboard extends StatefulWidget {
