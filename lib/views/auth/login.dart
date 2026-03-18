@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../../core/services/auth_service.dart';
-import '../dashboard.dart';
+import '../police/dashboard.dart';
 import 'selection_page.dart';
 import 'forgot_password.dart';
 

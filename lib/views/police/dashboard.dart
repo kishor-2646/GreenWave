@@ -1,10 +1,10 @@
 import 'package:flutter/material.dart';
-import 'package:green_wave/views/ambulance_dashboard.dart';
+import 'package:green_wave/views/ambulance/ambulance_dashboard.dart';
 import 'package:provider/provider.dart';
 
-// Services & Navigation
-import '../core/services/auth_service.dart';
-import 'police/police_map_page.dart';
+import '../../core/services/auth_service.dart';
+import 'police_map_page.dart';
+import '../admin/admin_dashboard.dart'; // NEW IMPORT
 
 class DashboardPage extends StatefulWidget {
   const DashboardPage({super.key});
@@ -20,7 +20,6 @@ class _DashboardPageState extends State<DashboardPage> {
     _handleRoleRouting();
   }
 
-  /// Checks the role and redirects the user to their specific dashboard
   void _handleRoleRouting() async {
     final authService = Provider.of<AuthService>(context, listen: false);
     final uid = authService.currentUser?.uid;
@@ -29,17 +28,12 @@ class _DashboardPageState extends State<DashboardPage> {
       final role = await authService.getUserRole(uid);
       if (mounted) {
         if (role == "Ambulance Driver") {
-          Navigator.pushReplacement(
-              context,
-              MaterialPageRoute(builder: (_) => const AmbulanceDashboard())
-          );
+          Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => const AmbulanceDashboard()));
         } else if (role == "Traffic Police") {
-          Navigator.pushReplacement(
-              context,
-              MaterialPageRoute(builder: (_) => const PoliceMapPage())
-          );
+          Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => const PoliceMapPage()));
+        } else if (role == "Admin") { // NEW ROLE HANDLER
+          Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => const AdminDashboard()));
         } else {
-          // Fallback or generic view if role is missing
           setState(() {});
         }
       }
@@ -50,9 +44,7 @@ class _DashboardPageState extends State<DashboardPage> {
   Widget build(BuildContext context) {
     return const Scaffold(
       backgroundColor: Colors.black,
-      body: Center(
-        child: CircularProgressIndicator(color: Color(0xFF22C55E)),
-      ),
+      body: Center(child: CircularProgressIndicator(color: Color(0xFF22C55E))),
     );
   }
 }
