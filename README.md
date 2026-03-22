@@ -26,7 +26,7 @@ It tracks ambulance movement and **automatically controls traffic signals** to e
 
 - 🚧 Heavy traffic delays ambulances
 - ⏱️ Delay in reaching hospitals costs lives
-- 🚦 Manual traffic control is inefficient
+- 🚦 Manual traffic control is inefficient..
 
 ---
 
