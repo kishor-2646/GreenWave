@@ -1,7 +1,7 @@
 <h1 align="center">🚑 GreenWave - Smart Ambulance Traffic System</h1>
 
 <p align="center">
-  <b>Real-time ambulance tracking & intelligent traffic control system 🚦</b><br>
+  <b>Real-time ambulance tracking & intelligent traffic control system. 🚦</b><br>
   <i>Building Green Corridors to save lives ❤️</i>
 </p>
 
