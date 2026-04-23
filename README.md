@@ -37,7 +37,7 @@ GreenWave solves this by:
 ✔️ Real-time ambulance tracking  
 ✔️ Automated traffic signal control  
 ✔️ Alerts to traffic police for non-automated junctions  
-✔️ Smart route optimization  
+✔️ Smart route optimization  .
 
 ---
 
