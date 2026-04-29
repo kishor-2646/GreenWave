@@ -16,7 +16,7 @@
 
 ## 🌟 Overview
 
-🚑 **GreenWave** is a real-time smart traffic management system designed to create a **green corridor for ambulances**.
+🚑 **GreenWave** is a real-time smart traffic management system designed to create a **green corridor for ambulances**
 
 It tracks ambulance movement and **automatically controls traffic signals** to ensure **faster and safer emergency transport**.
 
