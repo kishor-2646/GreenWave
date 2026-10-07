@@ -2,10 +2,13 @@ package com.greenwave.backend.controller;
 
 import com.greenwave.backend.dto.JunctionResponse;
 import com.greenwave.backend.service.JunctionService;
-import org.springframework.web.bind.annotation.GetMapping;
-import org.springframework.web.bind.annotation.RequestMapping;
-import org.springframework.web.bind.annotation.RequestParam;
-import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.bind.annotation.*;
+import com.greenwave.backend.dto.CreateJunctionRequest;
+import jakarta.validation.Valid;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.security.access.prepost.PreAuthorize;
+import io.swagger.v3.oas.annotations.security.SecurityRequirement;
 
 import java.util.List;
 
@@ -38,5 +41,18 @@ public class JunctionController {
                 lng,
                 radiusMeters
         );
+    }
+
+    @PreAuthorize("hasRole('ADMIN')")
+    @SecurityRequirement(name = "bearerAuth")
+    @PostMapping
+    public ResponseEntity<JunctionResponse> create(
+            @Valid @RequestBody CreateJunctionRequest request) {
+
+        JunctionResponse response = junctionService.createJunction(request);
+
+        return ResponseEntity
+                .status(HttpStatus.CREATED)
+                .body(response);
     }
 }
