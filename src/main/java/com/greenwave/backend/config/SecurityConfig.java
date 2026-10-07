@@ -39,10 +39,9 @@ public class SecurityConfig {
                 .authorizeHttpRequests(auth -> auth
                         .dispatcherTypeMatchers(DispatcherType.ERROR).permitAll()
 
-                        .requestMatchers(
-                                HttpMethod.GET,
-                                "/api/junctions/**"
-                        ).permitAll()
+                        .requestMatchers(HttpMethod.GET, "/api/junctions/**").permitAll()
+
+                        .requestMatchers(HttpMethod.GET, "/ws/**").permitAll()
 
                         .requestMatchers(
                                 "/api/users/signup",
