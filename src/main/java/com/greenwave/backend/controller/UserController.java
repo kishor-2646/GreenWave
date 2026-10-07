@@ -10,7 +10,10 @@ import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
-
+import com.greenwave.backend.entity.User;
+import org.springframework.security.core.annotation.AuthenticationPrincipal;
+import org.springframework.web.bind.annotation.GetMapping;
+import io.swagger.v3.oas.annotations.security.SecurityRequirement;
 @RestController
 @RequestMapping("/api/users")
 public class UserController {
@@ -31,5 +34,22 @@ public class UserController {
         return ResponseEntity
                 .status(HttpStatus.CREATED)
                 .body(response);
+    }
+
+    @SecurityRequirement(name = "bearerAuth")
+    @GetMapping("/me")
+    public ResponseEntity<UserResponse> me(
+            @AuthenticationPrincipal User user
+    ) {
+
+        UserResponse response = new UserResponse(
+                user.getId(),
+                user.getEmail(),
+                user.getFullName(),
+                user.getRole(),
+                user.isVerified()
+        );
+
+        return ResponseEntity.ok(response);
     }
 }
