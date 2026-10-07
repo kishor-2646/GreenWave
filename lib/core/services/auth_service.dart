@@ -1,81 +1,96 @@
-import 'package:firebase_auth/firebase_auth.dart';
-import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:dio/dio.dart';
+import 'package:flutter/foundation.dart';
+import '../network/api_client.dart';
+import '../network/token_storage.dart';
+import '../models/app_user.dart';
 
-class AuthService {
-  final FirebaseAuth _auth = FirebaseAuth.instance;
-  final FirebaseFirestore _db = FirebaseFirestore.instance;
+class AuthService extends ChangeNotifier {
+  final ApiClient _apiClient = ApiClient();
+  final TokenStorage _tokenStorage = TokenStorage();
 
-  // Stream of auth state changes
-  Stream<User?> get userState => _auth.authStateChanges();
+  AppUser? _currentUser;
+  AppUser? get currentUser => _currentUser;
+  bool get isLoggedIn => _currentUser != null;
 
-  // Get current user
-  User? get currentUser => _auth.currentUser;
+  String _mapRole(String displayRole) {
+    switch (displayRole) {
+      case 'Ambulance Driver':
+        return 'AMBULANCE_DRIVER';
+      case 'Traffic Police':
+        return 'POLICE';
+      default:
+        throw ArgumentError('Unknown role: $displayRole');
+    }
+  }
 
-  // Sign Up with Role
-  Future<UserCredential?> signUp({
+  Future<void> login(String email, String password) async {
+    try {
+      final response = await _apiClient.dio.post('/api/auth/login', data: {
+        'email': email,
+        'password': password,
+      });
+
+      final token = response.data['token'] as String;
+      await _tokenStorage.saveToken(token);
+      await _fetchCurrentUser();
+    } on DioException catch (e) {
+      throw Exception(_friendlyError(e));
+    }
+  }
+
+  Future<void> signUp({
     required String email,
     required String password,
     required String fullName,
-    required String mobile,
     required String role,
-    required String documentName,
   }) async {
     try {
-      UserCredential result = await _auth.createUserWithEmailAndPassword(
-        email: email,
-        password: password,
-      );
-
-      if (result.user != null) {
-        await _db.collection('users').doc(result.user!.uid).set({
-          'uid': result.user!.uid,
-          'fullName': fullName,
-          'email': email,
-          'mobile': mobile,
-          'role': role,
-          'documentUrl': documentName,
-          'isVerified': false,
-          'createdAt': FieldValue.serverTimestamp(),
-          'onDuty': false,
-        });
-      }
-      return result;
-    } catch (e) {
-      rethrow;
+      await _apiClient.dio.post('/api/users/signup', data: {
+        'email': email,
+        'password': password,
+        'fullName': fullName,
+        'role': _mapRole(role),
+      });
+    } on DioException catch (e) {
+      throw Exception(_friendlyError(e));
     }
   }
 
-  // Login
-  Future<UserCredential> login(String email, String password) async {
+  Future<void> _fetchCurrentUser() async {
+    final response = await _apiClient.dio.get('/api/users/me');
+    _currentUser = AppUser.fromJson(response.data);
+    notifyListeners();
+  }
+
+  Future<void> tryAutoLogin() async {
+    final token = await _tokenStorage.getToken();
+    if (token == null) return;
     try {
-      return await _auth.signInWithEmailAndPassword(email: email, password: password);
-    } catch (e) {
-      rethrow;
+      await _fetchCurrentUser();
+    } catch (_) {
+      await _tokenStorage.clearToken();
     }
   }
 
-  // Functional Forgot Password logic
-  Future<void> sendPasswordResetEmail(String email) async {
-    try {
-      await _auth.sendPasswordResetEmail(email: email);
-    } catch (e) {
-      rethrow;
-    }
+  Future<void> signOut() async {
+    await _tokenStorage.clearToken();
+    _currentUser = null;
+    notifyListeners();
   }
 
-  // Sign Out
-  Future<void> signOut() async => await _auth.signOut();
-
-  // Get User Role
-  Future<String?> getUserRole(String uid) async {
-    try {
-      DocumentSnapshot doc = await _db.collection('users').doc(uid).get();
-      if (doc.exists) {
-        return (doc.data() as Map<String, dynamic>)['role'];
-      }
-    } catch (e) {
-      return null;
+  String _friendlyError(DioException e) {
+    if (e.response?.statusCode == 401) {
+      return 'Invalid email or password.';
     }
-    return null;
+    if (e.response?.statusCode == 409) {
+      return 'This email is already registered.';
+    }
+    if (e.response?.statusCode == 400) {
+      return 'Please check your details and try again.';
+    }
+    if (e.type == DioExceptionType.connectionError) {
+      return 'Check your internet connection.';
+    }
+    return 'Something went wrong. Please try again.';
   }
 }

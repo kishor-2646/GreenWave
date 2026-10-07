@@ -1,9 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+
 import '../../core/services/auth_service.dart';
 import '../police/dashboard.dart';
 import 'selection_page.dart';
-import 'forgot_password.dart';
+import 'forgot_password.dart' as forgot_password;
 
 class LoginPage extends StatefulWidget {
   const LoginPage({super.key});
@@ -15,6 +16,7 @@ class LoginPage extends StatefulWidget {
 class _LoginPageState extends State<LoginPage> {
   final TextEditingController _emailController = TextEditingController();
   final TextEditingController _passwordController = TextEditingController();
+
   bool _isLoading = false;
 
   @override
@@ -37,7 +39,10 @@ class _LoginPageState extends State<LoginPage> {
 
     setState(() => _isLoading = true);
 
-    final authService = Provider.of<AuthService>(context, listen: false);
+    final authService = Provider.of<AuthService>(
+      context,
+      listen: false,
+    );
 
     try {
       await authService.login(email, password);
@@ -45,26 +50,19 @@ class _LoginPageState extends State<LoginPage> {
       if (mounted) {
         Navigator.pushReplacement(
           context,
-          MaterialPageRoute(builder: (_) => const DashboardPage()),
+          MaterialPageRoute(
+            builder: (_) => DashboardPage(),
+          ),
         );
       }
     } catch (e) {
-      String errorMsg = e.toString();
-
-      // Handle the Pigeon cast error gracefully if it persists
-      if (errorMsg.contains('List<Object?>') && errorMsg.contains('PigeonUserDetails')) {
-        errorMsg = "System Sync Error: Please restart your IDE and run 'flutter clean'.";
-      } else if (errorMsg.contains('invalid-credential') ||
-          errorMsg.contains('wrong-password') ||
-          errorMsg.contains('user-not-found')) {
-        errorMsg = "Invalid email or password. Please try again.";
-      } else if (errorMsg.contains('network-request-failed')) {
-        errorMsg = "Check your internet connection.";
-      }
-
-      _showError(errorMsg);
+      _showError(
+        e.toString().replaceFirst('Exception: ', ''),
+      );
     } finally {
-      if (mounted) setState(() => _isLoading = false);
+      if (mounted) {
+        setState(() => _isLoading = false);
+      }
     }
   }
 
@@ -97,7 +95,9 @@ class _LoginPageState extends State<LoginPage> {
             decoration: BoxDecoration(
               color: cardBg,
               borderRadius: BorderRadius.circular(20),
-              border: Border.all(color: Colors.white10),
+              border: Border.all(
+                color: Colors.white10,
+              ),
             ),
             child: Column(
               mainAxisSize: MainAxisSize.min,
@@ -105,29 +105,73 @@ class _LoginPageState extends State<LoginPage> {
                 const CircleAvatar(
                   radius: 30,
                   backgroundColor: brandGreen,
-                  child: Icon(Icons.login_rounded, color: Colors.white, size: 30),
+                  child: Icon(
+                    Icons.login_rounded,
+                    color: Colors.white,
+                    size: 30,
+                  ),
                 ),
+
                 const SizedBox(height: 16),
+
                 const Text(
                   "Welcome Back",
-                  style: TextStyle(color: Colors.white, fontSize: 26, fontWeight: FontWeight.bold),
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 26,
+                    fontWeight: FontWeight.bold,
+                  ),
                 ),
-                const Text("Sign in to your account", style: TextStyle(color: Colors.grey, fontSize: 14)),
+
+                const Text(
+                  "Sign in to your account",
+                  style: TextStyle(
+                    color: Colors.grey,
+                    fontSize: 14,
+                  ),
+                ),
+
                 const SizedBox(height: 32),
 
                 _buildInputLabel("Email ID"),
-                _buildTextField(inputBg, "Enter your email", controller: _emailController, keyboardType: TextInputType.emailAddress),
+
+                _buildTextField(
+                  inputBg,
+                  "Enter your email",
+                  controller: _emailController,
+                  keyboardType: TextInputType.emailAddress,
+                ),
 
                 const SizedBox(height: 20),
 
                 _buildInputLabel("Password"),
-                _buildTextField(inputBg, "Enter your password", isPassword: true, controller: _passwordController),
+
+                _buildTextField(
+                  inputBg,
+                  "Enter your password",
+                  isPassword: true,
+                  controller: _passwordController,
+                ),
 
                 Align(
                   alignment: Alignment.centerRight,
                   child: TextButton(
-                    onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const ForgotPasswordPage())),
-                    child: const Text("Forgot Password?", style: TextStyle(color: Colors.grey, fontSize: 12)),
+                    onPressed: () {
+                      Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (_) =>
+                          const forgot_password.ForgotPasswordPage(),
+                        ),
+                      );
+                    },
+                    child: const Text(
+                      "Forgot Password?",
+                      style: TextStyle(
+                        color: Colors.grey,
+                        fontSize: 12,
+                      ),
+                    ),
                   ),
                 ),
 
@@ -140,11 +184,27 @@ class _LoginPageState extends State<LoginPage> {
                     onPressed: _isLoading ? null : _handleLogin,
                     style: ElevatedButton.styleFrom(
                       backgroundColor: brandGreen,
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(10),
+                      ),
                     ),
                     child: _isLoading
-                        ? const SizedBox(height: 20, width: 20, child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2))
-                        : const Text("Login", style: TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold)),
+                        ? const SizedBox(
+                      height: 20,
+                      width: 20,
+                      child: CircularProgressIndicator(
+                        color: Colors.white,
+                        strokeWidth: 2,
+                      ),
+                    )
+                        : const Text(
+                      "Login",
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontSize: 16,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
                   ),
                 ),
 
@@ -152,12 +212,26 @@ class _LoginPageState extends State<LoginPage> {
                   padding: EdgeInsets.symmetric(vertical: 25.0),
                   child: Row(
                     children: [
-                      Expanded(child: Divider(color: Colors.white10)),
+                      Expanded(
+                        child: Divider(
+                          color: Colors.white10,
+                        ),
+                      ),
                       Padding(
                         padding: EdgeInsets.symmetric(horizontal: 10),
-                        child: Text("Don't have an account?", style: TextStyle(color: Colors.grey, fontSize: 12)),
+                        child: Text(
+                          "Don't have an account?",
+                          style: TextStyle(
+                            color: Colors.grey,
+                            fontSize: 12,
+                          ),
+                        ),
                       ),
-                      Expanded(child: Divider(color: Colors.white10)),
+                      Expanded(
+                        child: Divider(
+                          color: Colors.white10,
+                        ),
+                      ),
                     ],
                   ),
                 ),
@@ -166,12 +240,32 @@ class _LoginPageState extends State<LoginPage> {
                   width: double.infinity,
                   height: 50,
                   child: OutlinedButton.icon(
-                    onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const RoleSelectionPage())),
-                    icon: const Icon(Icons.person_add_alt_1, size: 18, color: Colors.white),
-                    label: const Text("Sign Up", style: TextStyle(color: Colors.white)),
+                    onPressed: () {
+                      Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (_) => const RoleSelectionPage(),
+                        ),
+                      );
+                    },
+                    icon: const Icon(
+                      Icons.person_add_alt_1,
+                      size: 18,
+                      color: Colors.white,
+                    ),
+                    label: const Text(
+                      "Sign Up",
+                      style: TextStyle(
+                        color: Colors.white,
+                      ),
+                    ),
                     style: OutlinedButton.styleFrom(
-                      side: const BorderSide(color: Colors.white10),
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                      side: const BorderSide(
+                        color: Colors.white10,
+                      ),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(10),
+                      ),
                     ),
                   ),
                 ),
@@ -188,25 +282,55 @@ class _LoginPageState extends State<LoginPage> {
       alignment: Alignment.centerLeft,
       child: Padding(
         padding: const EdgeInsets.only(bottom: 8.0),
-        child: Text(label, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w500)),
+        child: Text(
+          label,
+          style: const TextStyle(
+            color: Colors.white,
+            fontWeight: FontWeight.w500,
+          ),
+        ),
       ),
     );
   }
 
-  Widget _buildTextField(Color bgColor, String hint, {bool isPassword = false, required TextEditingController controller, TextInputType keyboardType = TextInputType.text}) {
+  Widget _buildTextField(
+      Color bgColor,
+      String hint, {
+        bool isPassword = false,
+        required TextEditingController controller,
+        TextInputType keyboardType = TextInputType.text,
+      }) {
     return TextField(
       controller: controller,
       obscureText: isPassword,
       keyboardType: keyboardType,
-      style: const TextStyle(color: Colors.white),
+      style: const TextStyle(
+        color: Colors.white,
+      ),
       decoration: InputDecoration(
         hintText: hint,
-        hintStyle: const TextStyle(color: Colors.grey, fontSize: 14),
+        hintStyle: const TextStyle(
+          color: Colors.grey,
+          fontSize: 14,
+        ),
         filled: true,
         fillColor: bgColor,
-        contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
-        enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: const BorderSide(color: Colors.white10)),
-        focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: const BorderSide(color: Color(0xFF22C55E))),
+        contentPadding: const EdgeInsets.symmetric(
+          horizontal: 16,
+          vertical: 16,
+        ),
+        enabledBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(10),
+          borderSide: const BorderSide(
+            color: Colors.white10,
+          ),
+        ),
+        focusedBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(10),
+          borderSide: const BorderSide(
+            color: Color(0xFF22C55E),
+          ),
+        ),
       ),
     );
   }

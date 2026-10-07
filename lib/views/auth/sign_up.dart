@@ -51,9 +51,7 @@ class _SignUpPageState extends State<SignUpPage> {
           email: emailController.text.trim(),
           password: passwordController.text.trim(),
           fullName: fullNameController.text.trim(),
-          mobile: mobileController.text.trim(),
           role: widget.role,
-          documentName: uploadedFileName!,
         );
 
         if (mounted) {

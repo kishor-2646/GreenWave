@@ -4,7 +4,7 @@ import 'package:provider/provider.dart';
 
 import '../../core/services/auth_service.dart';
 import 'police_map_page.dart';
-import '../admin/admin_dashboard.dart'; // NEW IMPORT
+import '../admin/admin_dashboard.dart';
 
 class DashboardPage extends StatefulWidget {
   const DashboardPage({super.key});
@@ -22,17 +22,33 @@ class _DashboardPageState extends State<DashboardPage> {
 
   void _handleRoleRouting() async {
     final authService = Provider.of<AuthService>(context, listen: false);
-    final uid = authService.currentUser?.uid;
+    final user = authService.currentUser;
 
-    if (uid != null) {
-      final role = await authService.getUserRole(uid);
+    if (user != null) {
+      final role = user.role;
+
       if (mounted) {
-        if (role == "Ambulance Driver") {
-          Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => const AmbulanceDashboard()));
-        } else if (role == "Traffic Police") {
-          Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => const PoliceMapPage()));
-        } else if (role == "Admin") { // NEW ROLE HANDLER
-          Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => const AdminDashboard()));
+        if (role == "AMBULANCE_DRIVER") {
+          Navigator.pushReplacement(
+            context,
+            MaterialPageRoute(
+              builder: (_) => const AmbulanceDashboard(),
+            ),
+          );
+        } else if (role == "POLICE") {
+          Navigator.pushReplacement(
+            context,
+            MaterialPageRoute(
+              builder: (_) => const PoliceMapPage(),
+            ),
+          );
+        } else if (role == "ADMIN") {
+          Navigator.pushReplacement(
+            context,
+            MaterialPageRoute(
+              builder: (_) => const AdminDashboard(),
+            ),
+          );
         } else {
           setState(() {});
         }
@@ -44,7 +60,11 @@ class _DashboardPageState extends State<DashboardPage> {
   Widget build(BuildContext context) {
     return const Scaffold(
       backgroundColor: Colors.black,
-      body: Center(child: CircularProgressIndicator(color: Color(0xFF22C55E))),
+      body: Center(
+        child: CircularProgressIndicator(
+          color: Color(0xFF22C55E),
+        ),
+      ),
     );
   }
 }
