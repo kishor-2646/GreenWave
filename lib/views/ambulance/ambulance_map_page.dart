@@ -12,6 +12,8 @@ import 'package:http/http.dart' as http;
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:audioplayers/audioplayers.dart';
 import '../../core/services/location_service.dart';
+import 'package:provider/provider.dart';
+import '../../core/services/auth_service.dart';
 
 class AmbulanceMapPage extends StatefulWidget {
   final LatLng? initialDestination;
@@ -25,7 +27,7 @@ class AmbulanceMapPage extends StatefulWidget {
 
 class _AmbulanceMapPageState extends State<AmbulanceMapPage> {
   GoogleMapController? _mapController;
-  final LocationService _locationService = LocationService();
+  late final LocationService _locationService;
   final FirebaseFirestore _db = FirebaseFirestore.instance;
   final AudioPlayer _audioPlayer = AudioPlayer();
 
@@ -48,6 +50,9 @@ class _AmbulanceMapPageState extends State<AmbulanceMapPage> {
   @override
   void initState() {
     super.initState();
+    _locationService = LocationService(
+      Provider.of<AuthService>(context, listen: false),
+    );
     if (widget.initialDestination != null) _destinationLocation = widget.initialDestination;
     _initLocation();
     _startEmergencyListener();
@@ -57,7 +62,7 @@ class _AmbulanceMapPageState extends State<AmbulanceMapPage> {
   }
 
   @override
-  void dispose() { _emergencySubscription?.cancel(); _audioPlayer.dispose(); super.dispose(); }
+  void dispose() { _locationService.dispose(); _emergencySubscription?.cancel(); _audioPlayer.dispose(); super.dispose(); }
 
   Future<void> _createPoliceCircleIcon() async {
     const int size = 80;

@@ -17,7 +17,10 @@ class _DashboardPageState extends State<DashboardPage> {
   @override
   void initState() {
     super.initState();
-    _handleRoleRouting();
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _handleRoleRouting();
+    });
   }
 
   void _handleRoleRouting() async {

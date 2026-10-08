@@ -1,12 +1,16 @@
-import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:flutter/foundation.dart';
 import 'package:geolocator/geolocator.dart';
-import 'package:firebase_auth/firebase_auth.dart';
+
+import '../network/location_socket_service.dart';
+import 'auth_service.dart';
 
 class LocationService {
-  final FirebaseFirestore _db = FirebaseFirestore.instance;
-  final FirebaseAuth _auth = FirebaseAuth.instance;
+  final AuthService _authService;
+  final LocationSocketService _socket = LocationSocketService();
 
-  String? get userId => _auth.currentUser?.uid;
+  LocationService(this._authService);
+
+  String? get userId => _authService.currentUser?.id;
 
   Stream<Position> getPositionStream() {
     return Geolocator.getPositionStream(
@@ -17,10 +21,12 @@ class LocationService {
     );
   }
 
+  // B1 sends position only. The emergency parameters are accepted so existing
+  // callers compile, and B2 will start sending them. The backend takes the
+  // user's role from the JWT, so `role` is unused here.
   Future<void> updateLiveLocation(
       Position position,
-      String role,
-      {
+      String role, {
         bool isEmergency = false,
         double? destLat,
         double? destLng,
@@ -29,44 +35,38 @@ class LocationService {
         String? nearestJunction,
         bool? isNearJunction,
         Map<String, String>? junctionEtas,
-      }
-      ) async {
-    final user = _auth.currentUser;
-    if (user == null) return;
+      }) async {
+    try {
+      await _socket.connect();
 
-    final collectionName = role == "Ambulance Driver" ? 'ambulanceLocations' : 'policeLocations';
-
-    final Map<String, dynamic> data = {
-      'uid': user.uid,
-      'latitude': position.latitude,
-      'longitude': position.longitude,
-      'heading': position.heading,
-      'timestamp': FieldValue.serverTimestamp(),
-      'status': isEmergency ? 'emergency' : 'active',
-    };
-
-    if (isEmergency) {
-      if (destLat != null) data['destLat'] = destLat;
-      if (destLng != null) data['destLng'] = destLng;
-      if (encodedPolyline != null) data['encodedPolyline'] = encodedPolyline;
-      if (pathJunctions != null) data['pathJunctions'] = pathJunctions;
-      if (nearestJunction != null) data['nearestJunction'] = nearestJunction;
-      if (isNearJunction != null) data['isNearJunction'] = isNearJunction;
-      if (junctionEtas != null) data['junctionEtas'] = junctionEtas;
+      _socket.sendLocation(
+        latitude: position.latitude,
+        longitude: position.longitude,
+        heading: position.heading,
+      );
+    } catch (e) {
+      debugPrint('Location send skipped: $e');
     }
-
-    // Use merge to ensure clearedJunctions aren't wiped
-    await _db.collection(collectionName).doc(user.uid).set(data, SetOptions(merge: true));
   }
 
   Future<bool> handleLocationPermission() async {
     bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
+
     if (!serviceEnabled) return false;
-    LocationPermission permission = await Geolocator.checkPermission();
+
+    LocationPermission permission =
+    await Geolocator.checkPermission();
+
     if (permission == LocationPermission.denied) {
       permission = await Geolocator.requestPermission();
-      if (permission == LocationPermission.denied) return false;
+
+      if (permission == LocationPermission.denied) {
+        return false;
+      }
     }
+
     return permission != LocationPermission.deniedForever;
   }
+
+  void dispose() => _socket.disconnect();
 }

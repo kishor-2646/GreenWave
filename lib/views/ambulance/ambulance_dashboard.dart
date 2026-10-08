@@ -195,7 +195,16 @@ class _AmbulanceDashboardState extends State<AmbulanceDashboard>
 
             // --- SECTION 2: TAP AND SELECT LOCATION (RESTORED) ---
             GestureDetector(
-              onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => AmbulanceMapPage(criticality: _selectedCriticality))),
+              onTap: () {
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (_) => AmbulanceMapPage(
+                      criticality: _selectedCriticality,
+                    ),
+                  ),
+                );
+              },
               child: Container(
                 padding: const EdgeInsets.all(20),
                 decoration: BoxDecoration(color: cardBg, borderRadius: BorderRadius.circular(24), border: Border.all(color: Colors.white10)),
