@@ -80,4 +80,12 @@ public class JunctionService {
                 location.getX()
         );
     }
+
+
+    public List<JunctionResponse> findAll() {
+        return junctionRepository.findAll()
+                .stream()
+                .map(this::toResponse)
+                .toList();
+    }
 }

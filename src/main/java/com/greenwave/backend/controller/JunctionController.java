@@ -55,4 +55,11 @@ public class JunctionController {
                 .status(HttpStatus.CREATED)
                 .body(response);
     }
+
+
+    @GetMapping
+    public List<JunctionResponse> all() {
+        return junctionService.findAll();
+    }
+
 }
