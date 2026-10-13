@@ -14,6 +14,13 @@ import com.greenwave.backend.entity.User;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.GetMapping;
 import io.swagger.v3.oas.annotations.security.SecurityRequirement;
+import com.greenwave.backend.dto.UpdateProfileRequest;
+import com.greenwave.backend.entity.Role;
+import java.util.List;
+import org.springframework.web.bind.annotation.PutMapping;
+import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.security.access.prepost.PreAuthorize;
+
 @RestController
 @RequestMapping("/api/users")
 public class UserController {
@@ -42,14 +49,25 @@ public class UserController {
             @AuthenticationPrincipal User user
     ) {
 
-        UserResponse response = new UserResponse(
-                user.getId(),
-                user.getEmail(),
-                user.getFullName(),
-                user.getRole(),
-                user.isVerified()
-        );
-
-        return ResponseEntity.ok(response);
+        return ResponseEntity.ok(UserResponse.from(user));
     }
+
+
+
+    @SecurityRequirement(name = "bearerAuth")
+    @PutMapping("/me")
+    public UserResponse updateMe(
+            @AuthenticationPrincipal User user,
+            @Valid @RequestBody UpdateProfileRequest request
+    ) {
+        return userService.updateProfile(user, request);
+    }
+
+    @SecurityRequirement(name = "bearerAuth")
+    @PreAuthorize("hasRole('ADMIN')")
+    @GetMapping
+    public List<UserResponse> list(@RequestParam(required = false) Role role) {
+        return userService.list(role);
+    }
+
 }

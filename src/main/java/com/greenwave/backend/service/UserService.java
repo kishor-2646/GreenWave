@@ -9,6 +9,10 @@ import org.springframework.http.HttpStatus;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.web.server.ResponseStatusException;
+import com.greenwave.backend.dto.UpdateProfileRequest;
+import org.springframework.transaction.annotation.Transactional;
+import java.util.List;
+
 
 @Service
 public class UserService {
@@ -59,17 +63,35 @@ public class UserService {
         User savedUser = userRepository.save(user);
 
         // 6. Return safe response
-        return toResponse(savedUser);
+        return UserResponse.from(savedUser);
     }
 
-    private UserResponse toResponse(User user) {
 
-        return new UserResponse(
-                user.getId(),
-                user.getEmail(),
-                user.getFullName(),
-                user.getRole(),
-                user.isVerified()
-        );
+    @Transactional
+    public UserResponse updateProfile(User principal, UpdateProfileRequest request) {
+
+        User user = userRepository.findById(principal.getId())
+                .orElseThrow(() -> new ResponseStatusException(
+                        HttpStatus.NOT_FOUND, "User not found"));
+
+        user.setFullName(request.fullName().trim());
+        user.setMobile(blankToNull(request.mobile()));
+        user.setHospital(blankToNull(request.hospital()));
+
+        return UserResponse.from(user);
     }
+
+    @Transactional(readOnly = true)
+    public List<UserResponse> list(Role role) {
+        List<User> users = (role == null)
+                ? userRepository.findAll()
+                : userRepository.findByRole(role);
+
+        return users.stream().map(UserResponse::from).toList();
+    }
+
+    private String blankToNull(String value) {
+        return (value == null || value.isBlank()) ? null : value.trim();
+    }
+
 }

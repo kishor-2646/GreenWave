@@ -37,4 +37,11 @@ public class User {
 
     @Column(nullable = false)
     private boolean isVerified;
+
+    // Optional profile fields. Nullable: signup doesn't ask for them.
+    @Column
+    private String mobile;
+
+    @Column
+    private String hospital;
 }
