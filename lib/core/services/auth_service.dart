@@ -3,6 +3,7 @@ import 'package:flutter/foundation.dart';
 import '../network/api_client.dart';
 import '../network/token_storage.dart';
 import '../models/app_user.dart';
+import '../network/api_error.dart';
 
 class AuthService extends ChangeNotifier {
   final ApiClient _apiClient = ApiClient();
@@ -76,6 +77,26 @@ class AuthService extends ChangeNotifier {
     await _tokenStorage.clearToken();
     _currentUser = null;
     notifyListeners();
+  }
+
+  Future<void> updateProfile({
+    required String fullName,
+    String? mobile,
+    String? hospital,
+  }) async {
+    try {
+      final response = await _apiClient.dio.put('/api/users/me', data: {
+        'fullName': fullName,
+        'mobile': mobile,
+        'hospital': hospital,
+      });
+
+      // Use the saved user returned by the backend.
+      _currentUser = AppUser.fromJson(response.data);
+      notifyListeners();
+    } on DioException catch (e) {
+      throw Exception(apiErrorMessage(e));
+    }
   }
 
   String _friendlyError(DioException e) {

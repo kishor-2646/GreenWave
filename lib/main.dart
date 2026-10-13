@@ -9,6 +9,8 @@ import 'firebase_options.dart';
 import 'core/services/auth_service.dart';
 import 'views/auth/flash_screen.dart';
 
+import 'core/network/realtime_service.dart';
+
 // Global instance for local notifications
 final FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin = FlutterLocalNotificationsPlugin();
 
@@ -58,7 +60,15 @@ void main() async {
   runApp(
     MultiProvider(
       providers: [
-        ChangeNotifierProvider<AuthService>(create: (_) => AuthService())
+        ChangeNotifierProvider<AuthService>(
+          create: (_) => AuthService(),
+        ),
+        Provider<RealtimeService>(
+          create: (context) => RealtimeService(
+            context.read<AuthService>(),
+          ),
+          dispose: (_, service) => service.dispose(),
+        ),
       ],
       child: const MyApp(),
     ),

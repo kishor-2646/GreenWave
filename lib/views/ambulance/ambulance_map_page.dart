@@ -2,7 +2,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
-import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:geolocator/geolocator.dart';
 import 'dart:async';
 import 'dart:convert';
@@ -14,6 +13,13 @@ import 'package:audioplayers/audioplayers.dart';
 import '../../core/services/location_service.dart';
 import 'package:provider/provider.dart';
 import '../../core/services/auth_service.dart';
+import 'package:dio/dio.dart';
+
+import '../../core/models/emergency.dart';
+import '../../core/network/api_error.dart';
+import '../../core/network/realtime_service.dart';
+import '../../core/repositories/emergency_repository.dart';
+import '../../core/repositories/police_repository.dart';
 
 class AmbulanceMapPage extends StatefulWidget {
   final LatLng? initialDestination;
@@ -27,43 +33,62 @@ class AmbulanceMapPage extends StatefulWidget {
 
 class _AmbulanceMapPageState extends State<AmbulanceMapPage> {
   GoogleMapController? _mapController;
+  late final RealtimeService _realtime;
   late final LocationService _locationService;
-  final FirebaseFirestore _db = FirebaseFirestore.instance;
+  final EmergencyRepository _emergencyRepo = EmergencyRepository();
+  final PoliceRepository _policeRepo = PoliceRepository();
   final AudioPlayer _audioPlayer = AudioPlayer();
 
-  bool _isEmergencyActive = false;
+  // The server's emergency is the single source of truth.
+  Emergency? _activeEmergency;
+  bool get _isEmergencyActive => _activeEmergency != null;
+
   bool _isFetchingRoute = false;
+  bool _isToggling = false;
   LatLng _currentLocation = const LatLng(0, 0);
   LatLng? _destinationLocation;
   String? _encodedPolyline;
 
   bool _isSpeaking = false;
   final Set<String> _announcedJunctions = {};
+
+  StreamSubscription<Position>? _positionSubscription;
   StreamSubscription? _emergencySubscription;
+  StreamSubscription? _radarSubscription;
+  StreamSubscription? _reconnectSubscription;
 
   Map<String, LatLng> _policeOnRoute = {};
   BitmapDescriptor? _policeCircleIcon;
 
-  final String _googleApiKey = dotenv.get('GOOGLE_MAPS_API_KEY', fallback: "");
-  final String _fcmServerKey = dotenv.get('FCM_SERVER_KEY', fallback: "");
+  final String _googleApiKey =
+  dotenv.get('GOOGLE_MAPS_API_KEY', fallback: "");
 
   @override
   void initState() {
     super.initState();
-    _locationService = LocationService(
-      Provider.of<AuthService>(context, listen: false),
-    );
-    if (widget.initialDestination != null) _destinationLocation = widget.initialDestination;
+
+    _realtime = context.read<RealtimeService>();
+    _locationService = LocationService(_realtime);
+
+    if (widget.initialDestination != null) {
+      _destinationLocation = widget.initialDestination;
+    }
+
     _initLocation();
-    _startEmergencyListener();
-    _resumeActiveEmergency();
-    _startPoliceRadarListener();
+    _startRealtime();
+    _refreshFromServer();
     _createPoliceCircleIcon();
   }
 
   @override
-  void dispose() { _locationService.dispose(); _emergencySubscription?.cancel(); _audioPlayer.dispose(); super.dispose(); }
-
+  void dispose() {
+    _positionSubscription?.cancel();
+    _emergencySubscription?.cancel();
+    _radarSubscription?.cancel();
+    _reconnectSubscription?.cancel();
+    _audioPlayer.dispose();
+    super.dispose();
+  }
   Future<void> _createPoliceCircleIcon() async {
     const int size = 80;
     final ui.PictureRecorder pictureRecorder = ui.PictureRecorder();
@@ -75,78 +100,145 @@ class _AmbulanceMapPageState extends State<AmbulanceMapPage> {
     if (byteData != null) setState(() { _policeCircleIcon = BitmapDescriptor.fromBytes(byteData.buffer.asUint8List()); });
   }
 
-  void _startPoliceRadarListener() {
-    _db.collection('policeLocations').snapshots().listen((snapshot) {
+
+  // ---------- location ----------
+
+  Future<void> _initLocation() async {
+    final hasPermission = await _locationService.handleLocationPermission();
+    if (!hasPermission) return;
+
+    final pos = await Geolocator.getCurrentPosition();
+    if (!mounted) return;
+    setState(() => _currentLocation = LatLng(pos.latitude, pos.longitude));
+    _locationService.sendPosition(pos);
+
+    _positionSubscription = _locationService.getPositionStream().listen((position) {
       if (!mounted) return;
-      final Map<String, LatLng> updatedPolice = {};
-      for (var doc in snapshot.docs) {
-        final data = doc.data();
-        if (data['junctionLat'] != null) updatedPolice[data['assignedJunction'] ?? "Officer"] = LatLng(data['junctionLat'], data['junctionLng']);
-      }
-      setState(() => _policeOnRoute = updatedPolice);
+      setState(() => _currentLocation = LatLng(position.latitude, position.longitude));
+      _locationService.sendPosition(position);
     });
   }
 
-  Future<void> _triggerFirestoreNotification() async {
-    final uid = _locationService.userId;
-    if (uid == null) return;
-    await _db.collection('emergency_alerts').add({
-      'ambulanceUid': uid,
-      'timestamp': FieldValue.serverTimestamp(),
-      'message': 'Ambulance Emergency: Priority Level ${widget.criticality}',
-      'criticality': widget.criticality,
-      'lat': _currentLocation.latitude,
-      'lng': _currentLocation.longitude,
-    });
+  // ---------- realtime ----------
+
+  void _startRealtime() {
+    _emergencySubscription =
+        _realtime.topic('/topic/emergencies').listen(_onEmergencyEvent);
+    _radarSubscription =
+        _realtime.topic('/topic/police-assignments').listen((_) => _refreshRadar());
+    _reconnectSubscription =
+        _realtime.onConnected.listen((_) => _refreshFromServer());
   }
 
-  Future<void> _sendEmergencyBroadcastNotification() async {
-    if (_fcmServerKey.isEmpty) return;
+  Future<void> _refreshFromServer() async {
+    await _syncActiveEmergency();
+    await _refreshRadar();
+  }
+
+  Future<void> _refreshRadar() async {
     try {
-      await http.post(Uri.parse('https://fcm.googleapis.com/fcm/send'), headers: {'Content-Type': 'application/json', 'Authorization': 'key=$_fcmServerKey'}, body: jsonEncode({'to': '/topics/police_alerts', 'notification': {'title': '🚨 EMERGENCY ALERT', 'body': 'Clear the path! Ambulance broadcast started.'}, 'priority': 'high'}));
-    } catch (e) { debugPrint("FCM Error: $e"); }
-  }
-
-  void _initLocation() async {
-    bool hasPermission = await _locationService.handleLocationPermission();
-    if (hasPermission) {
-      Position pos = await Geolocator.getCurrentPosition();
-      if (mounted) setState(() => _currentLocation = LatLng(pos.latitude, pos.longitude));
-      _locationService.getPositionStream().listen((Position position) {
-        if (!mounted) return;
-        setState(() => _currentLocation = LatLng(position.latitude, position.longitude));
-
-        // CRITICAL FIX: Ensure _encodedPolyline is only pushed when emergency is active
-        // This prevents overwriting the valid route with null during location pings
-        _locationService.updateLiveLocation(
-            position,
-            "Ambulance Driver",
-            isEmergency: _isEmergencyActive,
-            encodedPolyline: _isEmergencyActive ? _encodedPolyline : null,
-            destLat: _isEmergencyActive ? _destinationLocation?.latitude : null,
-            destLng: _isEmergencyActive ? _destinationLocation?.longitude : null
-        );
+      final assignments = await _policeRepo.getAssignments();
+      if (!mounted) return;
+      setState(() {
+        _policeOnRoute = {
+          for (final a in assignments)
+            a.junctionId: LatLng(a.latitude, a.longitude),
+        };
       });
+    } catch (e) {
+      debugPrint('Radar refresh failed: ${apiErrorMessage(e)}');
     }
   }
 
-  void _startEmergencyListener() {
-    final uid = _locationService.userId;
-    if (uid == null) return;
-    _emergencySubscription = _db.collection('ambulanceLocations').doc(uid).snapshots().listen((snapshot) {
-      if (!snapshot.exists || !_isEmergencyActive) return;
-      final data = snapshot.data() as Map<String, dynamic>;
-      final cleared = data['clearedJunctions'] as Map<String, dynamic>?;
-      if (cleared != null) {
-        cleared.forEach((key, val) {
-          if (!_announcedJunctions.contains(key)) {
-            _announcedJunctions.add(key);
-            _speakGemini("Update. ${val['name'] ?? "Junction"} has been cleared.");
-          }
-        });
+  Future<void> _syncActiveEmergency() async {
+    try {
+      final mine = await _emergencyRepo.getMine();
+      if (!mounted) return;
+      _applyEmergency(mine);
+    } catch (e) {
+      debugPrint('Emergency sync failed: ${apiErrorMessage(e)}');
+    }
+  }
+
+  void _onEmergencyEvent(Map<String, dynamic> json) {
+    if (!mounted) return;
+    try {
+      final event = EmergencyEvent.fromJson(json);
+      final myId = context.read<AuthService>().currentUser?.id;
+      if (event.emergency.ambulanceUserId != myId) return;
+      _applyEmergency(event.emergency);
+    } catch (e) {
+      debugPrint('Bad emergency event: $e');
+    }
+  }
+
+  void _applyEmergency(Emergency? emergency) {
+    final active =
+    (emergency != null && emergency.isActive) ? emergency : null;
+
+    if (active != null) {
+      for (final cleared in active.clearedJunctions) {
+        if (_announcedJunctions.add(cleared.junctionId)) {
+          _speakGemini(
+            'Update. ${cleared.junctionName} has been cleared.',
+          );
+        }
+      }
+    }
+
+    setState(() {
+      _activeEmergency = active;
+      if (active != null) {
+        _destinationLocation =
+            LatLng(active.destinationLat, active.destinationLng);
+        _encodedPolyline = active.encodedPolyline;
+      } else {
+        _encodedPolyline = null;
+        _announcedJunctions.clear();
       }
     });
   }
+
+  // ---------- start / stop ----------
+
+  Future<void> _toggleEmergency() async {
+    if (_isToggling) return;
+    if (!_isEmergencyActive && _destinationLocation == null) return;
+
+    setState(() => _isToggling = true);
+    try {
+      if (!_isEmergencyActive) {
+        await _fetchRoute();
+        if (_encodedPolyline == null || _destinationLocation == null) return;
+
+        final emergency = await _emergencyRepo.start(
+          criticality: widget.criticality,
+          destinationLat: _destinationLocation!.latitude,
+          destinationLng: _destinationLocation!.longitude,
+          encodedPolyline: _encodedPolyline,
+        );
+        if (mounted) _applyEmergency(emergency);
+      } else {
+        final id = _activeEmergency!.id;
+        final emergency = await _emergencyRepo.end(id);
+        if (mounted) _applyEmergency(emergency);
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(apiErrorMessage(e))),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _isToggling = false);
+    }
+  }
+
+
+
+
+
+
 
   Future<void> _speakGemini(String message) async {
     if (_isSpeaking || !mounted) return;
@@ -197,36 +289,8 @@ class _AmbulanceMapPageState extends State<AmbulanceMapPage> {
     } catch (e) { debugPrint("Route failed: $e"); } finally { if (mounted) setState(() => _isFetchingRoute = false); }
   }
 
-  void _toggleEmergency() async {
-    if (_destinationLocation == null && !_isEmergencyActive) return;
-    if (!_isEmergencyActive) {
-      setState(() { _isEmergencyActive = true; _announcedJunctions.clear(); });
-      await _fetchRoute();
-      Position pos = await Geolocator.getCurrentPosition();
-      await _locationService.updateLiveLocation(pos, "Ambulance Driver", isEmergency: true, encodedPolyline: _encodedPolyline, destLat: _destinationLocation?.latitude, destLng: _destinationLocation?.longitude);
-      _sendEmergencyBroadcastNotification();
-      _triggerFirestoreNotification();
-    } else {
-      setState(() { _isEmergencyActive = false; _encodedPolyline = null; });
-      Position pos = await Geolocator.getCurrentPosition();
-      await _locationService.updateLiveLocation(pos, "Ambulance Driver", isEmergency: false);
-      await _db.collection('ambulanceLocations').doc(_locationService.userId).update({'clearedJunctions': FieldValue.delete(), 'encodedPolyline': FieldValue.delete(), 'destLat': FieldValue.delete(), 'destLng': FieldValue.delete()});
-    }
-  }
 
-  Future<void> _resumeActiveEmergency() async {
-    final uid = _locationService.userId;
-    if (uid == null) return;
-    final doc = await _db.collection('ambulanceLocations').doc(uid).get();
-    if (doc.exists && doc.data()?['status'] == 'emergency') {
-      setState(() {
-        _isEmergencyActive = true;
-        _encodedPolyline = doc.data()?['encodedPolyline'];
-        if (doc.data()?['destLat'] != null) _destinationLocation = LatLng(doc.data()!['destLat'], doc.data()!['destLng']);
-      });
-      if (_destinationLocation != null) await _fetchRoute();
-    }
-  }
+
 
   @override
   Widget build(BuildContext context) {

@@ -1,16 +1,11 @@
-import 'package:flutter/foundation.dart';
 import 'package:geolocator/geolocator.dart';
 
-import '../network/location_socket_service.dart';
-import 'auth_service.dart';
+import '../network/realtime_service.dart';
 
 class LocationService {
-  final AuthService _authService;
-  final LocationSocketService _socket = LocationSocketService();
+  final RealtimeService _realtime;
 
-  LocationService(this._authService);
-
-  String? get userId => _authService.currentUser?.id;
+  LocationService(this._realtime);
 
   Stream<Position> getPositionStream() {
     return Geolocator.getPositionStream(
@@ -21,52 +16,27 @@ class LocationService {
     );
   }
 
-  // B1 sends position only. The emergency parameters are accepted so existing
-  // callers compile, and B2 will start sending them. The backend takes the
-  // user's role from the JWT, so `role` is unused here.
-  Future<void> updateLiveLocation(
-      Position position,
-      String role, {
-        bool isEmergency = false,
-        double? destLat,
-        double? destLng,
-        String? encodedPolyline,
-        List<String>? pathJunctions,
-        String? nearestJunction,
-        bool? isNearJunction,
-        Map<String, String>? junctionEtas,
-      }) async {
-    try {
-      await _socket.connect();
-
-      _socket.sendLocation(
-        latitude: position.latitude,
-        longitude: position.longitude,
-        heading: position.heading,
-      );
-    } catch (e) {
-      debugPrint('Location send skipped: $e');
-    }
+  /// Sends this GPS fix over the shared socket.
+  void sendPosition(Position position) {
+    _realtime.sendLocation(
+      latitude: position.latitude,
+      longitude: position.longitude,
+      heading: position.heading,
+    );
   }
 
   Future<bool> handleLocationPermission() async {
-    bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
-
+    final serviceEnabled = await Geolocator.isLocationServiceEnabled();
     if (!serviceEnabled) return false;
 
-    LocationPermission permission =
-    await Geolocator.checkPermission();
-
+    var permission = await Geolocator.checkPermission();
     if (permission == LocationPermission.denied) {
       permission = await Geolocator.requestPermission();
-
-      if (permission == LocationPermission.denied) {
-        return false;
-      }
+      if (permission == LocationPermission.denied) return false;
     }
 
     return permission != LocationPermission.deniedForever;
   }
 
-  void dispose() => _socket.disconnect();
+// No dispose(): RealtimeService owns the shared socket.
 }

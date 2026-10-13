@@ -1,8 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
-import 'package:cloud_firestore/cloud_firestore.dart';
 import '../../core/services/auth_service.dart';
 import '../auth/login.dart';
+
 
 class AmbulanceProfilePage extends StatefulWidget {
   const AmbulanceProfilePage({super.key});
@@ -12,7 +12,7 @@ class AmbulanceProfilePage extends StatefulWidget {
 }
 
 class _AmbulanceProfilePageState extends State<AmbulanceProfilePage> {
-  final FirebaseFirestore _db = FirebaseFirestore.instance;
+
   bool _isEditing = false;
   bool _isSaving = false;
 
@@ -39,40 +39,65 @@ class _AmbulanceProfilePageState extends State<AmbulanceProfilePage> {
     }
   }
 
-  Future<void> _updateProfile(String uid) async {
+
+  Future<void> _updateProfile() async {
+    final name = _nameController.text.trim();
+
+    if (name.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text("Name cannot be empty"),
+          backgroundColor: Colors.redAccent,
+        ),
+      );
+      return;
+    }
+
     setState(() => _isSaving = true);
+
     try {
-      await _db.collection('users').doc(uid).update({
-        'fullName': _nameController.text.trim(),
-        'hospital': _hospitalController.text.trim(),
-        'mobile': _mobileController.text.trim(),
+      await context.read<AuthService>().updateProfile(
+        fullName: name,
+        hospital: _hospitalController.text,
+        mobile: _mobileController.text,
+      );
+
+      if (!mounted) return;
+
+      setState(() {
+        _isEditing = false;
+        _isSaving = false;
       });
 
-      if (mounted) {
-        setState(() {
-          _isEditing = false;
-          _isSaving = false;
-        });
-        ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text("Profile updated successfully"), backgroundColor: Color(0xFF22C55E))
-        );
-      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text("Profile updated successfully"),
+          backgroundColor: Color(0xFF22C55E),
+        ),
+      );
     } catch (e) {
+      if (!mounted) return;
+
       setState(() => _isSaving = false);
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text("Error: $e"), backgroundColor: Colors.redAccent)
-        );
-      }
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            e.toString().replaceFirst('Exception: ', ''),
+          ),
+          backgroundColor: Colors.redAccent,
+        ),
+      );
     }
   }
+
 
   @override
   Widget build(BuildContext context) {
     const Color brandGreen = Color(0xFF22C55E);
     const Color cardBg = Color(0xFF1E1E1E);
-    final authService = Provider.of<AuthService>(context, listen: false);
-    final user = authService.currentUser;
+    // Rebuild this screen whenever AuthService updates the user.
+    final user = context.watch<AuthService>().currentUser;
 
     return Scaffold(
       backgroundColor: Colors.black,
@@ -92,7 +117,7 @@ class _AmbulanceProfilePageState extends State<AmbulanceProfilePage> {
                   color: _isEditing ? brandGreen : Colors.white, size: 28),
               onPressed: () {
                 if (_isEditing) {
-                  _updateProfile(user!.uid);
+                  _updateProfile();
                 } else {
                   setState(() => _isEditing = true);
                 }
@@ -101,21 +126,23 @@ class _AmbulanceProfilePageState extends State<AmbulanceProfilePage> {
           const SizedBox(width: 10),
         ],
       ),
-      body: StreamBuilder<DocumentSnapshot>(
-        stream: _db.collection('users').doc(user?.uid).snapshots(),
-        builder: (context, snapshot) {
-          if (!snapshot.hasData) return const Center(child: CircularProgressIndicator(color: brandGreen));
 
-          final userData = snapshot.data?.data() as Map<String, dynamic>?;
-
-          // Sync controllers with DB data when not editing
-          if (!_isEditing) {
-            _nameController.text = userData?['fullName'] ?? "";
-            _hospitalController.text = userData?['hospital'] ?? "";
-            _mobileController.text = userData?['mobile'] ?? "";
+      body: Builder(
+        builder: (context) {
+          if (user == null) {
+            return const Center(
+              child: CircularProgressIndicator(color: brandGreen),
+            );
           }
 
-          final String driverId = user?.uid.substring(0, 8).toUpperCase() ?? "GW-AMB-01";
+          // Sync fields only when the driver is not editing.
+          if (!_isEditing) {
+            _nameController.text = user.fullName;
+            _hospitalController.text = user.hospital ?? "";
+            _mobileController.text = user.mobile ?? "";
+          }
+
+          final String driverId = user.uid.substring(0, 8).toUpperCase();
 
           return SingleChildScrollView(
             padding: const EdgeInsets.all(24.0),
