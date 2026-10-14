@@ -20,6 +20,7 @@ import '../../core/network/api_error.dart';
 import '../../core/network/realtime_service.dart';
 import '../../core/repositories/emergency_repository.dart';
 import '../../core/repositories/police_repository.dart';
+import 'package:green_wave/core/network/api_client.dart';
 
 class AmbulanceMapPage extends StatefulWidget {
   final LatLng? initialDestination;
@@ -272,23 +273,45 @@ class _AmbulanceMapPageState extends State<AmbulanceMapPage> {
     return res;
   }
 
+
   Future<void> _fetchRoute() async {
     if (_destinationLocation == null) return;
-    setState(() => _isFetchingRoute = true);
-    final url = "https://maps.googleapis.com/maps/api/directions/json?origin=${_currentLocation.latitude},${_currentLocation.longitude}&destination=${_destinationLocation!.latitude},${_destinationLocation!.longitude}&mode=driving&key=$_googleApiKey";
-    try {
-      final resp = await http.get(Uri.parse(url));
-      if (resp.statusCode == 200) {
-        final data = json.decode(resp.body);
-        if (data['status'] == 'OK' && data['routes'].isNotEmpty) {
-          final String poly = data['routes'][0]['overview_polyline']['points'];
-          debugPrint("SYNC_DEBUG: String length received: ${poly.length}");
-          setState(() { _encodedPolyline = poly; });
-        }
-      }
-    } catch (e) { debugPrint("Route failed: $e"); } finally { if (mounted) setState(() => _isFetchingRoute = false); }
-  }
 
+    setState(() => _isFetchingRoute = true);
+
+    try {
+      final response = await ApiClient().dio.get(
+        '/api/routes',
+        queryParameters: {
+          'originLat': _currentLocation.latitude,
+          'originLng': _currentLocation.longitude,
+          'destinationLat': _destinationLocation!.latitude,
+          'destinationLng': _destinationLocation!.longitude,
+        },
+      );
+
+      debugPrint('ROUTE_HTTP_STATUS: ${response.statusCode}');
+
+      final data = response.data;
+      final String? poly = data['encodedPolyline'] as String?;
+
+      if (poly != null && poly.isNotEmpty) {
+        debugPrint('ROUTE_POLYLINE_LENGTH: ${poly.length}');
+
+        if (mounted) {
+          setState(() => _encodedPolyline = poly);
+        }
+      } else {
+        debugPrint('Route response did not contain an encoded polyline.');
+      }
+    } catch (e) {
+      debugPrint('Route failed: $e');
+    } finally {
+      if (mounted) {
+        setState(() => _isFetchingRoute = false);
+      }
+    }
+  }
 
 
 
