@@ -1,18 +1,30 @@
-import 'package:flutter/material.dart';
-import 'package:flutter/foundation.dart';
-import 'package:flutter/gestures.dart';
-import 'package:google_maps_flutter/google_maps_flutter.dart';
-import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:geolocator/geolocator.dart';
-import 'package:provider/provider.dart';
-import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
-import 'package:http/http.dart' as http;
+
 import 'package:audioplayers/audioplayers.dart';
+import 'package:dio/dio.dart';
+import 'package:flutter/foundation.dart';
+import 'package:flutter/gestures.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import 'package:geolocator/geolocator.dart';
+import 'package:google_maps_flutter/google_maps_flutter.dart';
+import 'package:http/http.dart' as http;
+import 'package:provider/provider.dart';
+
+import '../../core/models/emergency.dart';
+import '../../core/models/junction.dart';
+import '../../core/models/live_location.dart';
+import '../../core/network/api_error.dart';
+import '../../core/network/realtime_service.dart';
+import '../../core/repositories/emergency_repository.dart';
+import '../../core/repositories/junction_repository.dart';
+import '../../core/repositories/location_repository.dart';
+import '../../core/repositories/police_repository.dart';
 import '../../core/services/auth_service.dart';
+import '../../core/services/location_service.dart';
 
 class PoliceMapPage extends StatefulWidget {
   const PoliceMapPage({super.key});
@@ -32,76 +44,284 @@ class _PoliceMapPageState extends State<PoliceMapPage> with SingleTickerProvider
   static const Color bgBlack = Color(0xFF121212);
   static const Color emergencyPurple = Colors.purpleAccent;
 
-  final Map<String, LatLng> _junctionData = {
-    "Koramangala 5th Block Junction": const LatLng(12.9352, 77.6245),
-    "Silk Board Signal": const LatLng(12.9176, 77.6233),
-    "HSR Layout 27th Main": const LatLng(12.9128, 77.6387),
-    "Dairy Circle Flyover": const LatLng(12.9427, 77.5997),
-    "Agara Junction": const LatLng(12.9231, 77.6515),
-    "Sapthagiri Junction": const LatLng(13.0645, 77.4985),
-    "Chimney Hill Junction": const LatLng(13.0598, 77.4952),
-  };
+  // ---- dependencies ----
+  late final RealtimeService _realtime;
+  late final LocationService _locationService;
+  final EmergencyRepository _emergencyRepo = EmergencyRepository();
+  final PoliceRepository _policeRepo = PoliceRepository();
+  final JunctionRepository _junctionRepo = JunctionRepository();
+  final LocationRepository _locationRepo = LocationRepository();
 
-  String? _myAssignedJunction;
-  LatLng? _junctionLocation;
-  String? _lastAnnouncedJunction;
+  // ---- state that mirrors the SERVER ----
+  List<Junction> _junctions = [];
+  Junction? _myJunction; // the junction this officer is posted at
+  final Map<String, Emergency> _emergencies = {}; // active ones, key = emergency id
+  final Map<String, LiveLocation> _ambulances = {}; // key = ambulance user id
+
+  // ---- UI-only state ----
+  bool _isClearing = false; // blocks double taps on CLEAR/UNDO
   bool _isSpeaking = false;
   bool _isQuotaExceeded = false;
   DateTime? _lastSpeechTime;
-  final DateTime _appStartTime = DateTime.now(); // Track session start
 
-  final Map<String, List<LatLng>> _polylineCache = {};
-  final Set<String> _announcedAmbulances = {};
+  final Map<String, List<LatLng>> _polylineCache = {}; // key = emergency id
+  final Set<String> _announcedAmbulances = {}; // emergency ids we said "incoming" for
+  final Set<String> _arrivedAnnounced = {}; // emergency ids we said "reached" for
   final Set<String> _notifiedEmergencyIds = {};
 
   final AudioPlayer _audioPlayer = AudioPlayer();
-  final FirebaseFirestore _db = FirebaseFirestore.instance;
-  StreamSubscription? _ambulanceSubscription;
-  StreamSubscription? _notificationBridgeSubscription;
-
   final FlutterLocalNotificationsPlugin _localNotifications = FlutterLocalNotificationsPlugin();
+
+  StreamSubscription<Position>? _positionSubscription;
+  StreamSubscription? _emergencySubscription;
+  StreamSubscription? _ambulanceSubscription;
+  StreamSubscription? _reconnectSubscription;
 
   @override
   void initState() {
     super.initState();
+    _realtime = context.read<RealtimeService>();
+    _locationService = LocationService(_realtime);
     _tabController = TabController(length: 2, vsync: this);
     _checkPermissionsAndInit();
-    _startAmbulanceListener();
-    _startNotificationBridge(); // NEW: Real-time listener for alerts
+    _startRealtime();
+    _refreshFromServer();
   }
 
   @override
   void dispose() {
+    _positionSubscription?.cancel();
+    _emergencySubscription?.cancel();
     _ambulanceSubscription?.cancel();
-    _notificationBridgeSubscription?.cancel();
+    _reconnectSubscription?.cancel();
     _tabController.dispose();
     _audioPlayer.dispose();
     super.dispose();
   }
 
-  // --- NEW: THE FIRESTORE-TO-HARDWARE BRIDGE ---
-  void _startNotificationBridge() {
-    debugPrint("PUSH_SYSTEM: Notification Bridge Active.");
-    _notificationBridgeSubscription = _db
-        .collection('emergency_alerts')
-        .snapshots()
-        .listen((snapshot) {
-      for (var doc in snapshot.docChanges) {
-        if (doc.type == DocumentChangeType.added) {
-          final data = doc.doc.data();
-          if (data == null) continue;
+  // ======================= location =======================
 
-          final Timestamp? ts = data['timestamp'];
-          if (ts == null) continue;
+  Future<void> _checkPermissionsAndInit() async {
+    final granted = await _locationService.handleLocationPermission();
+    if (!granted || !mounted) return;
+    setState(() => _locationPermissionGranted = true);
 
-          // Only notify for alerts created AFTER the police app was opened
-          if (ts.toDate().isAfter(_appStartTime) && !_notifiedEmergencyIds.contains(doc.doc.id)) {
-            _notifiedEmergencyIds.add(doc.doc.id);
-            _showSystemNotification(data['message'] ?? "Incoming Emergency!");
+    final pos = await Geolocator.getCurrentPosition();
+    if (!mounted) return;
+    setState(() => _myLocation = LatLng(pos.latitude, pos.longitude));
+    _locationService.sendPosition(pos); // admins can now see this officer online
+
+    _positionSubscription = _locationService.getPositionStream().listen((position) {
+      if (!mounted) return;
+      setState(() => _myLocation = LatLng(position.latitude, position.longitude));
+      _locationService.sendPosition(position);
+    });
+  }
+
+  // ======================= realtime + server sync =======================
+
+  void _startRealtime() {
+    _emergencySubscription = _realtime.topic('/topic/emergencies').listen(_onEmergencyEvent);
+    _ambulanceSubscription = _realtime.topic('/topic/ambulance-updates').listen(_onAmbulanceLocation);
+    // Any (re)connect: we may have missed events, so rebuild state from REST.
+    _reconnectSubscription = _realtime.onConnected.listen((_) => _refreshFromServer());
+  }
+
+  // Runs a request; on failure logs and returns null instead of throwing,
+  // so one failing endpoint doesn't stop the other three from loading.
+  Future<T?> _safe<T>(Future<T> request) async {
+    try {
+      return await request;
+    } catch (e) {
+      debugPrint('Sync failed: ${apiErrorMessage(e)}');
+      return null;
+    }
+  }
+
+  Future<void> _refreshFromServer() async {
+    final junctions = await _safe(_junctionRepo.getAll());
+    final assignments = await _safe(_policeRepo.getAssignments());
+    final active = await _safe(_emergencyRepo.getActive());
+    final ambulances = await _safe(_locationRepo.getAmbulances());
+    if (!mounted) return;
+
+    final myId = context.read<AuthService>().currentUser?.id;
+
+    setState(() {
+      if (junctions != null) _junctions = junctions;
+
+      if (assignments != null) {
+        _myJunction = null;
+        for (final a in assignments) {
+          if (a.userId == myId) {
+            _myJunction = Junction(
+              id: a.junctionId,
+              name: a.junctionName,
+              latitude: a.latitude,
+              longitude: a.longitude,
+            );
           }
         }
       }
+
+      if (active != null) {
+        _emergencies
+          ..clear()
+          ..addEntries(active.map((e) => MapEntry(e.id, e)));
+        _polylineCache.removeWhere((id, _) => !_emergencies.containsKey(id));
+      }
+
+      if (ambulances != null) {
+        _ambulances.clear();
+        for (final l in ambulances) {
+          _ambulances[l.userId] = l;
+        }
+      }
     });
+    _evaluateVoice();
+  }
+
+  void _onEmergencyEvent(Map<String, dynamic> json) {
+    if (!mounted) return;
+    try {
+      final event = EmergencyEvent.fromJson(json);
+      setState(() => _applyEmergency(event.emergency));
+      if (event.type == 'STARTED') _notifyIfRelevant(event.emergency);
+      _evaluateVoice();
+    } catch (e) {
+      debugPrint('Bad emergency event: $e');
+    }
+  }
+
+  void _onAmbulanceLocation(Map<String, dynamic> json) {
+    if (!mounted) return;
+    try {
+      final loc = LiveLocation.fromJson(json);
+      setState(() => _ambulances[loc.userId] = loc);
+      _evaluateVoice();
+    } catch (e) {
+      debugPrint('Bad location event: $e');
+    }
+  }
+
+  // The one place a single emergency enters or leaves local state.
+  // Call it inside setState. Idempotent.
+  void _applyEmergency(Emergency e) {
+    if (e.isActive) {
+      _emergencies[e.id] = e;
+    } else {
+      _emergencies.remove(e.id);
+      _polylineCache.remove(e.id);
+      _announcedAmbulances.remove(e.id);
+      _arrivedAnnounced.remove(e.id);
+    }
+  }
+
+  // ======================= actions =======================
+
+  Future<void> _assignJunction(Junction junction) async {
+    try {
+      await _policeRepo.assign(junction.id);
+      if (!mounted) return;
+      setState(() {
+        _myJunction = junction;
+        _announcedAmbulances.clear();
+        _arrivedAnnounced.clear();
+        _polylineCache.clear();
+        _isQuotaExceeded = false;
+      });
+      _fitMapToPoints([_myLocation, LatLng(junction.latitude, junction.longitude)]);
+      _evaluateVoice();
+    } catch (e) {
+      _showSnack(apiErrorMessage(e), Colors.redAccent);
+    }
+  }
+
+  Future<void> _setCleared(Emergency emergency, {required bool cleared}) async {
+    final junction = _myJunction;
+    if (junction == null || _isClearing) return;
+
+    setState(() => _isClearing = true);
+    try {
+      // The server returns the updated emergency; we apply it right away.
+      // The broadcast event arrives too, and applying twice is harmless.
+      final updated = cleared
+          ? await _emergencyRepo.markCleared(emergency.id, junction.id)
+          : await _emergencyRepo.revertClearance(emergency.id, junction.id);
+      if (!mounted) return;
+      setState(() => _applyEmergency(updated));
+      _showSnack(
+        cleared ? 'Cleared - Route turning Green for Ambulance' : 'Clearance reverted',
+        cleared ? spotifyGreen : Colors.orange,
+      );
+    } on DioException catch (e) {
+      final code = e.response?.statusCode;
+      // 404/409: the emergency probably ended meanwhile. Re-sync so the stale card disappears.
+      if (code == 404 || code == 409) await _refreshFromServer();
+      _showSnack(apiErrorMessage(e), Colors.redAccent);
+    } finally {
+      if (mounted) setState(() => _isClearing = false);
+    }
+  }
+
+  void _showSnack(String message, Color color) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(message), backgroundColor: color, behavior: SnackBarBehavior.floating),
+    );
+  }
+
+  // ======================= relevance, distance, voice =======================
+
+  LatLng? get _junctionPoint {
+    final j = _myJunction;
+    return j == null ? null : LatLng(j.latitude, j.longitude);
+  }
+
+
+  bool _isRelevant(Emergency e) {
+    final point = _junctionPoint;
+    if (point == null) return false;
+
+    return _isPathColliding(e.encodedPolyline, point, e.id);
+  }
+
+
+  /// Straight-line metres from the ambulance to my post (null if unknown).
+  double? _distanceToPost(Emergency e) {
+    final point = _junctionPoint;
+    final loc = _ambulances[e.ambulanceUserId];
+    if (point == null || loc == null) return null;
+    return Geolocator.distanceBetween(loc.latitude, loc.longitude, point.latitude, point.longitude);
+  }
+
+  String _formatDistance(double? metres) {
+    if (metres == null) return 'Locating...';
+    return metres < 1000 ? '${metres.round()} m' : '${(metres / 1000).toStringAsFixed(1)} km';
+  }
+
+  void _evaluateVoice() {
+    if (_myJunction == null) return;
+    for (final e in _emergencies.values) {
+      if (!_isRelevant(e)) continue;
+      if (_announcedAmbulances.add(e.id)) {
+        _speakGemini('Alert. An ambulance is incoming on your junction path. Stay alert.');
+        continue;
+      }
+      final d = _distanceToPost(e);
+      if (d != null && d < 500 && _arrivedAnnounced.add(e.id)) {
+        _speakGemini('Alert. The ambulance has reached your junction. Clear the signals immediately.',
+            urgent: true);
+      }
+    }
+  }
+
+  // ======================= notification =======================
+
+  void _notifyIfRelevant(Emergency e) {
+    if (!_notifiedEmergencyIds.add(e.id)) return; // never notify twice for one emergency
+    if (_myJunction != null && !_isRelevant(e)) return; // not on my route
+    _showSystemNotification('Priority ${e.criticality} emergency: ${e.ambulanceName} is on the move.');
   }
 
   Future<void> _showSystemNotification(String body) async {
@@ -117,91 +337,17 @@ class _PoliceMapPageState extends State<PoliceMapPage> with SingleTickerProvider
       ledOnMs: 1000,
       ledOffMs: 500,
     );
-
     const NotificationDetails details = NotificationDetails(android: androidDetails);
 
     await _localNotifications.show(
-      DateTime.now().millisecond,
+      DateTime.now().millisecondsSinceEpoch ~/ 1000, // unique per second (was .millisecond: collides)
       "🚨 AMBULANCE ALERT",
       body,
       details,
     );
   }
 
-  Future<void> _checkPermissionsAndInit() async {
-    LocationPermission permission = await Geolocator.checkPermission();
-    if (permission == LocationPermission.denied) {
-      permission = await Geolocator.requestPermission();
-    }
-    if (permission == LocationPermission.always || permission == LocationPermission.whileInUse) {
-      if (mounted) setState(() => _locationPermissionGranted = true);
-      Position pos = await Geolocator.getCurrentPosition();
-      if (mounted) setState(() => _myLocation = LatLng(pos.latitude, pos.longitude));
-      Geolocator.getPositionStream().listen((Position position) {
-        if (mounted) setState(() => _myLocation = LatLng(position.latitude, position.longitude));
-      });
-    }
-  }
-
-  void _startAmbulanceListener() {
-    _ambulanceSubscription?.cancel();
-    _ambulanceSubscription = _db
-        .collection('ambulanceLocations')
-        .where('status', isEqualTo: 'emergency')
-        .snapshots()
-        .listen((snapshot) {
-      if (snapshot.docs.isEmpty) {
-        _announcedAmbulances.clear();
-        _polylineCache.clear();
-        _lastAnnouncedJunction = null;
-        return;
-      }
-      if (_junctionLocation == null) return;
-      final matchingAmbs = snapshot.docs.where((doc) {
-        final data = doc.data();
-        return _isAmbulanceRelevant(data, data['uid'] ?? doc.id);
-      }).toList();
-      if (matchingAmbs.isNotEmpty) _processVoiceUpdates(matchingAmbs.first.data());
-    });
-  }
-
-  bool _isAmbulanceRelevant(Map<String, dynamic> data, String id) {
-    if (_junctionLocation == null) return false;
-    bool pathCollision = _isPathColliding(data['encodedPolyline'], _junctionLocation, id);
-    if (pathCollision) return true;
-    if (data['latitude'] != null) {
-      double dist = Geolocator.distanceBetween(data['latitude'], data['longitude'], _junctionLocation!.latitude, _junctionLocation!.longitude);
-      if (dist < 5000) return true;
-    }
-    return false;
-  }
-
-  Future<void> _markTrafficCleared(String ambUid) async {
-    if (_myAssignedJunction == null || _junctionLocation == null) return;
-    try {
-      final key = _myAssignedJunction!.replaceAll('.', '_');
-      await _db.collection('ambulanceLocations').doc(ambUid).set({
-        'clearedJunctions': {
-          key: {
-            'name': _myAssignedJunction,
-            'lat': _junctionLocation!.latitude,
-            'lng': _junctionLocation!.longitude,
-            'clearedAt': FieldValue.serverTimestamp(),
-          }
-        }
-      }, SetOptions(merge: true));
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Cleared - Route turning Green for Ambulance"), backgroundColor: spotifyGreen, behavior: SnackBarBehavior.floating));
-    } catch (e) { debugPrint("Clearance Error: $e"); }
-  }
-
-  Future<void> _unmarkTrafficCleared(String ambUid) async {
-    if (_myAssignedJunction == null) return;
-    try {
-      final key = _myAssignedJunction!.replaceAll('.', '_');
-      await _db.collection('ambulanceLocations').doc(ambUid).update({'clearedJunctions.$key': FieldValue.delete()});
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Clearance reverted"), backgroundColor: Colors.orange, behavior: SnackBarBehavior.floating));
-    } catch (e) { debugPrint("Unmark Error: $e"); }
-  }
+  // ======================= voice (Gemini TTS) — unchanged except `urgent` =======================
 
   Uint8List _createWavHeader(Uint8List pcmData, int sampleRate) {
     final int fileSize = pcmData.length + 44;
@@ -225,74 +371,43 @@ class _PoliceMapPageState extends State<PoliceMapPage> with SingleTickerProvider
     return wavData;
   }
 
-  Future<void> _speakGemini(String message) async {
+  // `urgent` skips the 10-second spacing rule, so "reached your junction"
+  // isn't swallowed because "incoming" was spoken a moment ago.
+  Future<void> _speakGemini(String message, {bool urgent = false}) async {
     if (_isSpeaking || !mounted) return;
     final now = DateTime.now();
-    if (_lastSpeechTime != null && now.difference(_lastSpeechTime!).inSeconds < 10) return;
+    if (!urgent && _lastSpeechTime != null && now.difference(_lastSpeechTime!).inSeconds < 10) return;
     setState(() => _isSpeaking = true);
     final String apiKey = dotenv.get('GEMINI_API_KEY', fallback: dotenv.get('GOOGLE_MAPS_API_KEY', fallback: ""));
-    if (apiKey.isEmpty) { setState(() => _isSpeaking = false); return; }
+    if (apiKey.isEmpty) {
+      setState(() => _isSpeaking = false);
+      return;
+    }
     final url = Uri.parse("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key=$apiKey");
     final payload = {"contents": [{"parts": [{"text": message}]}], "generationConfig": {"responseModalities": ["AUDIO"], "speechConfig": {"voiceConfig": {"prebuiltVoiceConfig": {"voiceName": "Aoede"}}}}};
     try {
       final response = await http.post(url, body: jsonEncode(payload), headers: {"Content-Type": "application/json"});
       if (response.statusCode == 200) {
-        setState(() => _isQuotaExceeded = false);
+        if (mounted) setState(() => _isQuotaExceeded = false);
         final result = jsonDecode(response.body);
         final audioPart = result['candidates']?[0]?['content']?['parts']?[0]?['inlineData'];
         if (audioPart != null) {
           _lastSpeechTime = DateTime.now();
-          final String base64Data = audioPart['data'];
-          final wavBytes = _createWavHeader(base64Decode(base64Data), 24000);
+          final wavBytes = _createWavHeader(base64Decode(audioPart['data']), 24000);
           await _audioPlayer.play(BytesSource(wavBytes));
         }
-      } else if (response.statusCode == 429) { if (mounted) setState(() => _isQuotaExceeded = true); }
-    } catch (e) { debugPrint("TTS: $e"); } finally { await Future.delayed(const Duration(seconds: 2)); if (mounted) setState(() => _isSpeaking = false); }
-  }
-
-  void _processVoiceUpdates(Map<String, dynamic> data) {
-    if (_myAssignedJunction == null) return;
-    final String ambId = data['uid'] ?? 'unknown';
-    if (!_announcedAmbulances.contains(ambId)) {
-      _announcedAmbulances.add(ambId);
-      _speakGemini("Alert. An ambulance is incoming on your junction path. Stay alerted and updated as it moves near.");
-      return;
-    }
-    String? currentJunction = data['nearestJunction']?.toString();
-    if (currentJunction == null || currentJunction == _lastAnnouncedJunction) return;
-    final genericWords = ['turn', 'head', 'keep', 'take', 'at the', 'roundabout', 'merge'];
-    if (genericWords.any((word) => currentJunction!.toLowerCase().startsWith(word))) return;
-    final List path = data['pathJunctions'] ?? [];
-    int myIdx = path.indexWhere((j) => _fuzzyMatch(j.toString(), _myAssignedJunction!));
-    int ambIdx = path.indexWhere((j) => _fuzzyMatch(j.toString(), currentJunction));
-    if (myIdx != -1 && ambIdx != -1 && ambIdx <= myIdx) {
-      _lastAnnouncedJunction = currentJunction;
-      int remaining = myIdx - ambIdx;
-      String eta = _getEtaForJunction(data['junctionEtas'], _myAssignedJunction);
-      String voiceMessage = remaining == 0
-          ? "Alert. The ambulance has reached your junction. Clear the signals immediately."
-          : "Update. The ambulance has crossed $currentJunction. It is $remaining junctions away. Estimated arrival is $eta.";
-      _speakGemini(voiceMessage);
+      } else if (response.statusCode == 429) {
+        if (mounted) setState(() => _isQuotaExceeded = true);
+      }
+    } catch (e) {
+      debugPrint("TTS: $e");
+    } finally {
+      await Future.delayed(const Duration(seconds: 2));
+      if (mounted) setState(() => _isSpeaking = false);
     }
   }
 
-  void _updateDutyJunction(String junctionName) {
-    final location = _junctionData[junctionName];
-    setState(() {
-      _myAssignedJunction = junctionName;
-      _junctionLocation = location;
-      _lastAnnouncedJunction = null;
-      _announcedAmbulances.clear();
-      _polylineCache.clear();
-      _isQuotaExceeded = false;
-    });
-    final uid = Provider.of<AuthService>(context, listen: false).currentUser?.uid;
-    if (uid != null) {
-      _db.collection('policeLocations').doc(uid).set({'assignedJunction': junctionName, 'junctionLat': location?.latitude, 'junctionLng': location?.longitude, 'lastUpdated': FieldValue.serverTimestamp()}, SetOptions(merge: true));
-    }
-    if (_mapController != null && location != null) _fitMapToPoints([_myLocation, location]);
-    _startAmbulanceListener();
-  }
+  // ======================= map helpers =======================
 
   void _fitMapToPoints(List<LatLng> points) {
     if (points.isEmpty) return;
@@ -304,51 +419,104 @@ class _PoliceMapPageState extends State<PoliceMapPage> with SingleTickerProvider
       if (p.longitude < minLng) minLng = p.longitude;
       if (p.longitude > maxLng) maxLng = p.longitude;
     }
-    _mapController?.animateCamera(CameraUpdate.newLatLngBounds(LatLngBounds(southwest: LatLng(minLat, minLng), northeast: LatLng(maxLat, maxLng)), 80));
+    _mapController?.animateCamera(CameraUpdate.newLatLngBounds(
+        LatLngBounds(southwest: LatLng(minLat, minLng), northeast: LatLng(maxLat, maxLng)), 80));
   }
 
   List<LatLng> _decodePolyline(String encoded) {
-    List<LatLng> points = []; int index = 0, len = encoded.length; int lat = 0, lng = 0;
+    List<LatLng> points = [];
+    int index = 0, len = encoded.length;
+    int lat = 0, lng = 0;
     while (index < len) {
       int b, shift = 0, result = 0;
-      do { b = encoded.codeUnitAt(index++) - 63; result |= (b & 0x1f) << shift; shift += 5; } while (b >= 0x20);
+      do {
+        if (index >= len) return points; // truncated string: stop instead of crashing
+        b = encoded.codeUnitAt(index++) - 63;
+        result |= (b & 0x1f) << shift;
+        shift += 5;
+      } while (b >= 0x20);
       lat += ((result & 1) != 0 ? ~(result >> 1) : (result >> 1));
-      shift = 0; result = 0;
-      do { b = encoded.codeUnitAt(index++) - 63; result |= (b & 0x1f) << shift; shift += 5; } while (b >= 0x20);
+      shift = 0;
+      result = 0;
+      do {
+        if (index >= len) return points;
+        b = encoded.codeUnitAt(index++) - 63;
+        result |= (b & 0x1f) << shift;
+        shift += 5;
+      } while (b >= 0x20);
       lng += ((result & 1) != 0 ? ~(result >> 1) : (result >> 1));
       points.add(LatLng(lat / 1E5, lng / 1E5));
     }
     return points;
   }
 
-  bool _isPathColliding(String? encodedPolyline, LatLng? junctionLoc, String ambId) {
+  // Decoded route for an emergency, cached by emergency id.
+  List<LatLng>? _routePoints(Emergency e) {
+    final encoded = e.encodedPolyline;
+    if (encoded == null) return null;
+    return _polylineCache.putIfAbsent(e.id, () => _decodePolyline(encoded));
+  }
+
+
+  bool _isPathColliding(
+      String? encodedPolyline,
+      LatLng? junctionLoc,
+      String emergencyId,
+      ) {
     if (encodedPolyline == null || junctionLoc == null) return false;
+
     try {
-      final List<LatLng> pathPoints = _polylineCache[ambId] ?? _decodePolyline(encodedPolyline);
-      _polylineCache[ambId] = pathPoints;
-      for (int i = 0; i < pathPoints.length; i += 5) {
-        double d = Geolocator.distanceBetween(pathPoints[i].latitude, pathPoints[i].longitude, junctionLoc.latitude, junctionLoc.longitude);
-        if (d < 1500) return true;
+      final pathPoints = _polylineCache.putIfAbsent(
+        emergencyId,
+            () => _decodePolyline(encodedPolyline),
+      );
+
+      if (pathPoints.isEmpty) return false;
+
+      const toleranceMetres = 100.0;
+
+      // Check every route segment instead of skipping route points.
+      for (int i = 0; i < pathPoints.length - 1; i++) {
+        final start = pathPoints[i];
+        final end = pathPoints[i + 1];
+
+        final segmentLength = Geolocator.distanceBetween(
+          start.latitude,
+          start.longitude,
+          end.latitude,
+          end.longitude,
+        );
+
+        // Sample long segments more densely, at intervals of about 25 m.
+        final steps = (segmentLength / 25).ceil().clamp(1, 10000);
+
+        for (int step = 0; step <= steps; step++) {
+          final t = step / steps;
+
+          final lat = start.latitude +
+              (end.latitude - start.latitude) * t;
+          final lng = start.longitude +
+              (end.longitude - start.longitude) * t;
+
+          final distance = Geolocator.distanceBetween(
+            lat,
+            lng,
+            junctionLoc.latitude,
+            junctionLoc.longitude,
+          );
+
+          if (distance <= toleranceMetres) return true;
+        }
       }
-    } catch (e) { debugPrint("Decoding error: $e"); }
+    } catch (e) {
+      debugPrint('Route matching error: $e');
+    }
+
     return false;
   }
 
-  bool _fuzzyMatch(String target, String source) {
-    String t = target.toLowerCase(); String s = source.toLowerCase();
-    if (t.contains(s) || s.contains(t)) return true;
-    final stopWords = {'signal', 'junction', 'circle', 'flyover', 'road', 'rd', 'main', 'block', 'onto', 'at'};
-    List<String> keywords = s.split(' ').where((w) => w.length >= 3 && !stopWords.contains(w)).toList();
-    return keywords.isNotEmpty && keywords.every((k) => t.contains(k));
-  }
 
-  String _getEtaForJunction(Map<String, dynamic>? etas, String? myJunction) {
-    if (etas == null || myJunction == null) return "Calculating...";
-    try {
-      String? matchingKey = etas.keys.firstWhere((k) => _fuzzyMatch(k, myJunction), orElse: () => "");
-      return (matchingKey != null && matchingKey.isNotEmpty) ? etas[matchingKey] : "Calculating...";
-    } catch (e) { return "Calculating..."; }
-  }
+  // ======================= UI =======================
 
   @override
   Widget build(BuildContext context) {
@@ -358,13 +526,20 @@ class _PoliceMapPageState extends State<PoliceMapPage> with SingleTickerProvider
         backgroundColor: Colors.black,
         title: const Text('Traffic Control Portal', style: TextStyle(fontSize: 18)),
         actions: [
-          PopupMenuButton<String>(
+          PopupMenuButton<Junction>(
             icon: const Icon(Icons.settings_input_component, color: spotifyGreen),
-            onSelected: _updateDutyJunction,
-            itemBuilder: (context) => _junctionData.keys.map((j) => PopupMenuItem(value: j, child: Text(j, style: const TextStyle(fontSize: 13)))).toList(),
+            onSelected: _assignJunction,
+            itemBuilder: (context) => _junctions
+                .map((j) => PopupMenuItem<Junction>(
+                value: j, child: Text(j.name, style: const TextStyle(fontSize: 13))))
+                .toList(),
           )
         ],
-        bottom: TabBar(controller: _tabController, tabs: const [Tab(text: 'ALERTS'), Tab(text: 'MAP')], indicatorColor: spotifyGreen, labelColor: spotifyGreen),
+        bottom: TabBar(
+            controller: _tabController,
+            tabs: const [Tab(text: 'ALERTS'), Tab(text: 'MAP')],
+            indicatorColor: spotifyGreen,
+            labelColor: spotifyGreen),
       ),
       body: Column(
         children: [
@@ -376,122 +551,229 @@ class _PoliceMapPageState extends State<PoliceMapPage> with SingleTickerProvider
   }
 
   Widget _buildDutyHeader() {
+    final name = _myJunction?.name;
     return Container(
-      width: double.infinity, padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 16), color: Colors.white.withOpacity(0.05),
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 16),
+      color: Colors.white.withOpacity(0.05),
       child: Row(
         children: [
-          Icon(Icons.radar, size: 14, color: _myAssignedJunction == null ? Colors.orange : spotifyGreen),
+          Icon(Icons.radar, size: 14, color: name == null ? Colors.orange : spotifyGreen),
           const SizedBox(width: 8),
           Expanded(
             child: Text(
-                _myAssignedJunction == null
+                name == null
                     ? "⚠️ SELECT YOUR JUNCTION (TOP-RIGHT)"
-                    : "SYSTEM ACTIVE: Scanning Path for Duty at $_myAssignedJunction",
-                style: TextStyle(color: _myAssignedJunction == null ? Colors.orange : Colors.greenAccent, fontSize: 11, fontWeight: FontWeight.w600)
-            ),
+                    : "SYSTEM ACTIVE: Scanning Path for Duty at $name",
+                style: TextStyle(
+                    color: name == null ? Colors.orange : Colors.greenAccent,
+                    fontSize: 11,
+                    fontWeight: FontWeight.w600)),
           ),
-          if (_isQuotaExceeded) const Text("VOICE QUOTA REACHED", style: TextStyle(color: Colors.redAccent, fontSize: 10, fontWeight: FontWeight.bold)),
+          if (_isQuotaExceeded)
+            const Text("VOICE QUOTA REACHED",
+                style: TextStyle(color: Colors.redAccent, fontSize: 10, fontWeight: FontWeight.bold)),
         ],
       ),
     );
   }
 
   Widget _buildAlertsList() {
-    return StreamBuilder<QuerySnapshot>(
-      stream: _db.collection('ambulanceLocations').where('status', isEqualTo: 'emergency').snapshots(),
-      builder: (context, snapshot) {
-        if (!snapshot.hasData) return const Center(child: CircularProgressIndicator(color: spotifyGreen));
-        final relevantDocs = snapshot.data!.docs.where((doc) {
-          final data = doc.data() as Map<String, dynamic>;
-          return _isAmbulanceRelevant(data, doc.id);
-        }).toList();
-        if (relevantDocs.isEmpty) return const Center(child: Text("Waiting for incoming ambulances...", style: TextStyle(color: Colors.white30)));
-        return ListView(
-          padding: const EdgeInsets.all(16),
-          children: relevantDocs.map((doc) {
-            final data = doc.data() as Map<String, dynamic>;
-            final String ambUid = data['uid'] ?? doc.id;
-            String eta = _getEtaForJunction(data['junctionEtas'], _myAssignedJunction);
-            bool isCleared = false;
-            if (data['clearedJunctions'] != null && _myAssignedJunction != null) {
-              isCleared = data['clearedJunctions'][_myAssignedJunction!.replaceAll('.', '_')] != null;
-            }
-            return Container(
-              margin: const EdgeInsets.only(bottom: 12), padding: const EdgeInsets.all(16),
-              decoration: BoxDecoration(color: isCleared ? spotifyGreen.withOpacity(0.2) : darkCard, borderRadius: BorderRadius.circular(15), border: Border.all(color: isCleared ? spotifyGreen : Colors.white10, width: 2)),
-              child: Column(
-                children: [
-                  Row(children: [Icon(Icons.local_hospital, color: isCleared ? spotifyGreen : Colors.red), const SizedBox(width: 10), Expanded(child: Text(isCleared ? "TRAFFIC CLEARED" : "INCOMING AMBULANCE", style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)))]),
-                  const Divider(color: Colors.white10, height: 20),
-                  Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [const Text("ETA to your post:", style: TextStyle(color: Colors.white70, fontSize: 13)), Text(eta, style: TextStyle(color: spotifyGreen, fontWeight: FontWeight.bold))]),
-                  const SizedBox(height: 12),
-                  Row(
-                    children: [
-                      Expanded(child: ElevatedButton(onPressed: () { _tabController.animateTo(1); _mapController?.animateCamera(CameraUpdate.newLatLngZoom(LatLng(data['latitude'], data['longitude']), 17)); }, style: ElevatedButton.styleFrom(backgroundColor: spotifyGreen, foregroundColor: Colors.black), child: const Text("MAP"))),
-                      const SizedBox(width: 8),
-                      Expanded(child: ElevatedButton(onPressed: () => isCleared ? _unmarkTrafficCleared(ambUid) : _markTrafficCleared(ambUid), style: ElevatedButton.styleFrom(backgroundColor: isCleared ? Colors.white10 : spotifyGreen, foregroundColor: Colors.white), child: Text(isCleared ? "UNDO" : "CLEAR TRAFFIC"))),
-                    ],
-                  ),
-                ],
-              ),
-            );
-          }).toList(),
-        );
-      },
+    final relevant = _emergencies.values.where(_isRelevant).toList();
+    if (relevant.isEmpty) {
+      return const Center(child: Text("Waiting for incoming ambulances...", style: TextStyle(color: Colors.white30)));
+    }
+    return ListView(
+      padding: const EdgeInsets.all(16),
+      children: relevant.map(_buildAlertCard).toList(),
+    );
+  }
+
+  Widget _buildAlertCard(Emergency e) {
+    final myJunctionId = _myJunction?.id;
+    final isCleared = e.clearedJunctions.any((c) => c.junctionId == myJunctionId);
+    final loc = _ambulances[e.ambulanceUserId];
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 12),
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+          color: isCleared ? spotifyGreen.withOpacity(0.2) : darkCard,
+          borderRadius: BorderRadius.circular(15),
+          border: Border.all(color: isCleared ? spotifyGreen : Colors.white10, width: 2)),
+      child: Column(
+        children: [
+          Row(children: [
+            Icon(Icons.local_hospital, color: isCleared ? spotifyGreen : Colors.red),
+            const SizedBox(width: 10),
+            Expanded(
+                child: Text(
+                    isCleared ? "TRAFFIC CLEARED" : "INCOMING: ${e.ambulanceName} · P${e.criticality}",
+                    style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)))
+          ]),
+          const Divider(color: Colors.white10, height: 20),
+          Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+            const Text("Distance to your post:", style: TextStyle(color: Colors.white70, fontSize: 13)),
+            Text(_formatDistance(_distanceToPost(e)),
+                style: const TextStyle(color: spotifyGreen, fontWeight: FontWeight.bold))
+          ]),
+          const SizedBox(height: 12),
+          Row(
+            children: [
+              Expanded(
+                  child: ElevatedButton(
+                      onPressed: () {
+                        _tabController.animateTo(1);
+                        if (loc != null) {
+                          _mapController?.animateCamera(
+                              CameraUpdate.newLatLngZoom(LatLng(loc.latitude, loc.longitude), 17));
+                        }
+                      },
+                      style: ElevatedButton.styleFrom(backgroundColor: spotifyGreen, foregroundColor: Colors.black),
+                      child: const Text("MAP"))),
+              const SizedBox(width: 8),
+              Expanded(
+                  child: ElevatedButton(
+                      onPressed: _isClearing ? null : () => _setCleared(e, cleared: !isCleared),
+                      style: ElevatedButton.styleFrom(
+                          backgroundColor: isCleared ? Colors.white10 : spotifyGreen,
+                          foregroundColor: Colors.white),
+                      child: Text(isCleared ? "UNDO" : "CLEAR TRAFFIC"))),
+            ],
+          ),
+        ],
+      ),
     );
   }
 
   Widget _buildMap() {
-    return StreamBuilder<QuerySnapshot>(
-        stream: _db.collection('ambulanceLocations').where('status', isEqualTo: 'emergency').snapshots(),
-        builder: (context, snapshot) {
-          Set<Marker> markers = {Marker(markerId: const MarkerId("police_me"), position: _myLocation, icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueBlue))};
-          Set<Polyline> polylines = {};
-          Map<String, dynamic>? activeAmb;
-          if (_junctionLocation != null) markers.add(Marker(markerId: const MarkerId("assigned_junction"), position: _junctionLocation!, icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueGreen)));
-          if (snapshot.hasData) {
-            for (var doc in snapshot.data!.docs) {
-              final data = doc.data() as Map<String, dynamic>;
-              final String id = data['uid'] ?? doc.id;
-              if (_isAmbulanceRelevant(data, id)) {
-                activeAmb = data;
-                markers.add(Marker(markerId: MarkerId(doc.id), position: LatLng(data['latitude'], data['longitude']), icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueRed)));
-                if (data['encodedPolyline'] != null) {
-                  final List<LatLng> points = _polylineCache[id] ?? _decodePolyline(data['encodedPolyline']);
-                  _polylineCache[id] = points;
-                  LatLng? splitPoint;
-                  if (data['clearedJunctions'] != null) {
-                    double furthestD = -1;
-                    data['clearedJunctions'].forEach((k, v) {
-                      if (v['lat'] != null && v['lng'] != null) {
-                        double d = Geolocator.distanceBetween(points.first.latitude, points.first.longitude, v['lat'], v['lng']);
-                        if (d > furthestD) { furthestD = d; splitPoint = LatLng(v['lat'], v['lng']); }
-                      }
-                    });
-                  }
-                  if (splitPoint == null) { polylines.add(Polyline(polylineId: PolylineId("${doc.id}_poly"), points: points, color: emergencyPurple, width: 6)); }
-                  else {
-                    int splitIdx = 0; double minD = 1000000;
-                    for (int i = 0; i < points.length; i++) {
-                      double d = Geolocator.distanceBetween(points[i].latitude, points[i].longitude, splitPoint!.latitude, splitPoint!.longitude);
-                      if (d < minD) { minD = d; splitIdx = i; }
-                    }
-                    polylines.add(Polyline(polylineId: PolylineId("${doc.id}_cleared"), points: points.sublist(0, splitIdx + 1), color: spotifyGreen, width: 8));
-                    polylines.add(Polyline(polylineId: PolylineId("${doc.id}_rem"), points: points.sublist(splitIdx), color: emergencyPurple, width: 6));
-                  }
-                }
-              }
-            }
-          }
-          return Stack(
-            children: [
-              GoogleMap(initialCameraPosition: CameraPosition(target: _myLocation, zoom: 14), onMapCreated: (c) => _mapController = c, myLocationEnabled: _locationPermissionGranted, myLocationButtonEnabled: false, markers: markers, polylines: polylines, gestureRecognizers: <Factory<OneSequenceGestureRecognizer>>{ Factory<OneSequenceGestureRecognizer>(() => EagerGestureRecognizer()) }),
-              if (activeAmb != null)
-                Positioned(bottom: 20, left: 16, right: 16, child: Container(padding: const EdgeInsets.all(16), decoration: BoxDecoration(color: darkCard, borderRadius: BorderRadius.circular(15), border: Border.all(color: spotifyGreen, width: 2), boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.5), blurRadius: 8, offset: const Offset(0, 4))]), child: Row(children: [Icon(_isSpeaking ? Icons.volume_up : Icons.timer, color: spotifyGreen), const SizedBox(width: 12), Expanded(child: Text("Ambulance arriving in ${_getEtaForJunction(activeAmb['junctionEtas'], _myAssignedJunction)}", style: const TextStyle(color: Colors.white, fontSize: 15, fontWeight: FontWeight.bold))), IconButton(icon: const Icon(Icons.gps_fixed, color: spotifyGreen), onPressed: () => _mapController?.animateCamera(CameraUpdate.newLatLngZoom(LatLng(activeAmb!['latitude'], activeAmb['longitude']), 17)))]))),
-              Positioned(top: 16, right: 16, child: Column(children: [FloatingActionButton.small(heroTag: "rec", backgroundColor: Colors.black.withOpacity(0.7), onPressed: () => _mapController?.animateCamera(CameraUpdate.newCameraPosition(CameraPosition(target: _myLocation, zoom: 16))), child: const Icon(Icons.my_location, color: spotifyGreen)), if (_junctionLocation != null) ...[const SizedBox(height: 8), FloatingActionButton.small(heroTag: "post", backgroundColor: Colors.black.withOpacity(0.7), onPressed: () => _mapController?.animateCamera(CameraUpdate.newLatLngZoom(_junctionLocation!, 16)), child: const Icon(Icons.flag, color: Colors.green))]])),
-            ],
-          );
+    final markers = <Marker>{
+      Marker(
+          markerId: const MarkerId("police_me"),
+          position: _myLocation,
+          icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueBlue)),
+    };
+    final polylines = <Polyline>{};
+    Emergency? activeEmergency;
+    LiveLocation? activeAmbulance;
+
+    final point = _junctionPoint;
+    if (point != null) {
+      markers.add(Marker(
+          markerId: const MarkerId("assigned_junction"),
+          position: point,
+          icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueGreen)));
+    }
+
+    for (final e in _emergencies.values.where(_isRelevant)) {
+      activeEmergency ??= e;
+      final loc = _ambulances[e.ambulanceUserId];
+      if (loc != null) {
+        activeAmbulance ??= loc;
+        markers.add(Marker(
+            markerId: MarkerId("amb_${e.id}"),
+            position: LatLng(loc.latitude, loc.longitude),
+            icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueRed)));
+      }
+
+      final points = _routePoints(e);
+      if (points == null || points.isEmpty) continue;
+
+      // The cleared part of the route is drawn green, the rest purple.
+      // The split is at the cleared junction furthest from the route's start.
+      LatLng? splitPoint;
+      double furthest = -1;
+      for (final c in e.clearedJunctions) {
+        final d = Geolocator.distanceBetween(
+            points.first.latitude, points.first.longitude, c.latitude, c.longitude);
+        if (d > furthest) {
+          furthest = d;
+          splitPoint = LatLng(c.latitude, c.longitude);
         }
+      }
+
+      final split = splitPoint;
+      if (split == null) {
+        polylines.add(Polyline(polylineId: PolylineId("${e.id}_poly"), points: points, color: emergencyPurple, width: 6));
+      } else {
+        int splitIdx = 0;
+        double minD = double.infinity;
+        for (int i = 0; i < points.length; i++) {
+          final d = Geolocator.distanceBetween(points[i].latitude, points[i].longitude, split.latitude, split.longitude);
+          if (d < minD) {
+            minD = d;
+            splitIdx = i;
+          }
+        }
+        polylines.add(Polyline(
+            polylineId: PolylineId("${e.id}_cleared"),
+            points: points.sublist(0, splitIdx + 1),
+            color: spotifyGreen,
+            width: 8));
+        polylines.add(Polyline(
+            polylineId: PolylineId("${e.id}_rem"),
+            points: points.sublist(splitIdx),
+            color: emergencyPurple,
+            width: 6));
+      }
+    }
+
+    return Stack(
+      children: [
+        GoogleMap(
+            initialCameraPosition: CameraPosition(target: _myLocation, zoom: 14),
+            onMapCreated: (c) => _mapController = c,
+            myLocationEnabled: _locationPermissionGranted,
+            myLocationButtonEnabled: false,
+            markers: markers,
+            polylines: polylines,
+            gestureRecognizers: <Factory<OneSequenceGestureRecognizer>>{
+              Factory<OneSequenceGestureRecognizer>(() => EagerGestureRecognizer())
+            }),
+        if (activeEmergency != null)
+          Positioned(
+              bottom: 20,
+              left: 16,
+              right: 16,
+              child: Container(
+                  padding: const EdgeInsets.all(16),
+                  decoration: BoxDecoration(
+                      color: darkCard,
+                      borderRadius: BorderRadius.circular(15),
+                      border: Border.all(color: spotifyGreen, width: 2),
+                      boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.5), blurRadius: 8, offset: const Offset(0, 4))]),
+                  child: Row(children: [
+                    Icon(_isSpeaking ? Icons.volume_up : Icons.timer, color: spotifyGreen),
+                    const SizedBox(width: 12),
+                    Expanded(
+                        child: Text("Ambulance is ${_formatDistance(_distanceToPost(activeEmergency))} away",
+                            style: const TextStyle(color: Colors.white, fontSize: 15, fontWeight: FontWeight.bold))),
+                    if (activeAmbulance != null)
+                      IconButton(
+                          icon: const Icon(Icons.gps_fixed, color: spotifyGreen),
+                          onPressed: () => _mapController?.animateCamera(CameraUpdate.newLatLngZoom(
+                              LatLng(activeAmbulance!.latitude, activeAmbulance.longitude), 17)))
+                  ]))),
+        Positioned(
+            top: 16,
+            right: 16,
+            child: Column(children: [
+              FloatingActionButton.small(
+                  heroTag: "rec",
+                  backgroundColor: Colors.black.withOpacity(0.7),
+                  onPressed: () => _mapController?.animateCamera(
+                      CameraUpdate.newCameraPosition(CameraPosition(target: _myLocation, zoom: 16))),
+                  child: const Icon(Icons.my_location, color: spotifyGreen)),
+              if (point != null) ...[
+                const SizedBox(height: 8),
+                FloatingActionButton.small(
+                    heroTag: "post",
+                    backgroundColor: Colors.black.withOpacity(0.7),
+                    onPressed: () => _mapController?.animateCamera(CameraUpdate.newLatLngZoom(point, 16)),
+                    child: const Icon(Icons.flag, color: Colors.green))
+              ]
+            ])),
+      ],
     );
   }
 }
