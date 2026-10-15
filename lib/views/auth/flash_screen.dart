@@ -1,8 +1,12 @@
+
 import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
 
-// Import your login page
+import '../../core/services/auth_service.dart';
 import 'login.dart';
+import '../police/dashboard.dart';
+
 
 class FlashScreen extends StatefulWidget {
   const FlashScreen({super.key});
@@ -16,6 +20,7 @@ class _FlashScreenState extends State<FlashScreen> {
   late Timer _dotTimer;
 
   @override
+  @override
   void initState() {
     super.initState();
 
@@ -27,14 +32,27 @@ class _FlashScreenState extends State<FlashScreen> {
       });
     });
 
-    // Navigate to Login page after 5 seconds
-    Future.delayed(const Duration(seconds: 5), () {
-      if (!mounted) return;
-      Navigator.pushReplacement(
-        context,
-        MaterialPageRoute(builder: (_) => const LoginPage()),
-      );
-    });
+    _startUp();
+  }
+
+  Future<void> _startUp() async {
+    final auth = context.read<AuthService>();
+
+    // Run auto-login and the minimum splash duration together.
+    await Future.wait([
+      auth.tryAutoLogin(),
+      Future.delayed(const Duration(seconds: 2)),
+    ]);
+
+    if (!mounted) return;
+
+    Navigator.pushReplacement(
+      context,
+      MaterialPageRoute(
+        builder: (_) =>
+        auth.isLoggedIn ? const DashboardPage() : const LoginPage(),
+      ),
+    );
   }
 
   @override

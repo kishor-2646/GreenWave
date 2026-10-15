@@ -63,15 +63,23 @@ class AuthService extends ChangeNotifier {
     notifyListeners();
   }
 
+
   Future<void> tryAutoLogin() async {
     final token = await _tokenStorage.getToken();
     if (token == null) return;
+
     try {
       await _fetchCurrentUser();
-    } catch (_) {
-      await _tokenStorage.clearToken();
+    } on DioException catch (e) {
+      // A 401 means the token is invalid or expired.
+      // The ApiClient interceptor should already clear it.
+      // Keep the token for network errors so login can retry next time.
+      debugPrint(
+        'Auto-login skipped: ${e.type} ${e.response?.statusCode}',
+      );
     }
   }
+
 
   Future<void> signOut() async {
     await _tokenStorage.clearToken();
