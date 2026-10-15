@@ -1,4 +1,5 @@
 import 'package:dio/dio.dart';
+import 'package:flutter/foundation.dart';
 
 /// Turns any exception into a short sentence a driver can read.
 /// Screens call this instead of showing technical Dio errors.
@@ -29,4 +30,15 @@ String apiErrorMessage(Object error) {
   }
 
   return 'Something went wrong. Please try again.';
+}
+
+/// Runs a request; on failure logs it and returns null instead of throwing.
+/// Lets a screen load several endpoints independently: one failure doesn't block the rest.
+Future<T?> safeCall<T>(Future<T> request) async {
+  try {
+    return await request;
+  } catch (e) {
+    debugPrint('Request failed: ${apiErrorMessage(e)}');
+    return null;
+  }
 }
